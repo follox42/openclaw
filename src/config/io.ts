@@ -200,6 +200,160 @@ export function parseConfigJson5(
   }
 }
 
+/**
+ * Log config recovery events to a dedicated log file.
+ * This ensures errors are never silently swallowed.
+ */
+function logConfigRecovery(
+  stateDir: string,
+  event: {
+    timestamp: string;
+    action: "recovery_attempted" | "recovery_success" | "recovery_failed";
+    originalError: string;
+    backupUsed?: string;
+    message: string;
+  },
+  ioFs: typeof fs = fs,
+): void {
+  try {
+    const logPath = path.join(stateDir, "config-recovery.log");
+    const logLine = `[${event.timestamp}] ${event.action.toUpperCase()}: ${event.message}${event.originalError ? `\n  Original error: ${event.originalError}` : ""}${event.backupUsed ? `\n  Backup used: ${event.backupUsed}` : ""}\n`;
+    ioFs.mkdirSync(path.dirname(logPath), { recursive: true });
+    ioFs.appendFileSync(logPath, logLine, "utf-8");
+  } catch {
+    // Best effort logging - don't fail if we can't write logs
+  }
+}
+
+/**
+ * Try to recover config from backup files when the main config is invalid.
+ * Returns the recovered config if successful, null otherwise.
+ * All recovery attempts are logged to config-recovery.log.
+ */
+function tryRecoverFromBackup(
+  configPath: string,
+  deps: Required<ConfigIoDeps>,
+  originalError: string,
+): MoltbotConfig | null {
+  const stateDir = resolveStateDir(deps.env, deps.homedir);
+  const timestamp = new Date().toISOString();
+
+  // Check if auto-recovery is disabled via env var
+  if (deps.env.CLAWDBOT_DISABLE_CONFIG_RECOVERY?.trim()) {
+    logConfigRecovery(
+      stateDir,
+      {
+        timestamp,
+        action: "recovery_attempted",
+        originalError,
+        message: "Auto-recovery disabled via CLAWDBOT_DISABLE_CONFIG_RECOVERY",
+      },
+      deps.fs,
+    );
+    return null;
+  }
+
+  // List of backup files to try in order
+  const backupFiles = [
+    `${configPath}.bak`,
+    `${configPath}.bak.1`,
+    `${configPath}.bak.2`,
+    `${configPath}.bak.3`,
+    `${configPath}.bak.4`,
+  ];
+
+  logConfigRecovery(
+    stateDir,
+    {
+      timestamp,
+      action: "recovery_attempted",
+      originalError,
+      message: `Config invalid at ${configPath}, attempting recovery from backups`,
+    },
+    deps.fs,
+  );
+
+  for (const backupPath of backupFiles) {
+    if (!deps.fs.existsSync(backupPath)) {
+      continue;
+    }
+
+    try {
+      const raw = deps.fs.readFileSync(backupPath, "utf-8");
+      const parsed = deps.json5.parse(raw);
+
+      // Resolve includes and env vars
+      const resolved = resolveConfigIncludes(parsed, backupPath, {
+        readFile: (p) => deps.fs.readFileSync(p, "utf-8"),
+        parseJson: (rawStr) => deps.json5.parse(rawStr),
+      });
+
+      if (resolved && typeof resolved === "object" && "env" in resolved) {
+        applyConfigEnv(resolved as MoltbotConfig, deps.env);
+      }
+
+      const substituted = resolveConfigEnvVars(resolved, deps.env);
+
+      // Validate the backup config
+      const validated = validateConfigObjectWithPlugins(substituted);
+      if (!validated.ok) {
+        deps.logger.warn(`Backup ${backupPath} also invalid, trying next...`);
+        continue;
+      }
+
+      // Apply defaults
+      const cfg = applyModelDefaults(
+        applyCompactionDefaults(
+          applyContextPruningDefaults(
+            applyAgentDefaults(
+              applySessionDefaults(applyLoggingDefaults(applyMessageDefaults(validated.config))),
+            ),
+          ),
+        ),
+      );
+      normalizeConfigPaths(cfg);
+
+      // Restore the backup as the main config
+      try {
+        deps.fs.copyFileSync(backupPath, configPath);
+        deps.logger.warn(`Config recovered from ${backupPath}`);
+      } catch (copyErr) {
+        deps.logger.warn(`Could not restore backup to main config: ${String(copyErr)}`);
+      }
+
+      logConfigRecovery(
+        stateDir,
+        {
+          timestamp,
+          action: "recovery_success",
+          originalError,
+          backupUsed: backupPath,
+          message: `Successfully recovered config from backup`,
+        },
+        deps.fs,
+      );
+
+      return applyConfigOverrides(cfg);
+    } catch (err) {
+      deps.logger.warn(`Failed to load backup ${backupPath}: ${String(err)}`);
+      continue;
+    }
+  }
+
+  logConfigRecovery(
+    stateDir,
+    {
+      timestamp,
+      action: "recovery_failed",
+      originalError,
+      message: "No valid backup found, using empty config",
+    },
+    deps.fs,
+  );
+
+  return null;
+}
+
 export function createConfigIO(overrides: ConfigIoDeps = {}) {
   const deps = normalizeDeps(overrides);
   const requestedConfigPath = resolveConfigPathForDeps(deps);
@@ -311,8 +465,13 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
         deps.logger.error(err.message);
         throw err;
       }
-      const error = err as { code?: string };
+      const error = err as { code?: string; details?: string };
       if (error?.code === "INVALID_CONFIG") {
+        // Try to recover from backup
+        const recovered = tryRecoverFromBackup(configPath, deps, error.details ?? "unknown error");
+        if (recovered) {
+          return recovered;
+        }
         return {};
       }
       deps.logger.error(`Failed to read config at ${configPath}`, err);

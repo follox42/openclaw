@@ -1,6 +1,7 @@
 import { type RunOptions, run } from "@grammyjs/runner";
 import type { OpenClawConfig } from "../config/config.js";
 import type { RuntimeEnv } from "../runtime.js";
+import { startTelegramVoice } from "../channels/plugins/telegram-voice/start.js";
 import { resolveAgentMaxConcurrent } from "../config/agent-limits.js";
 import { loadConfig } from "../config/config.js";
 import { computeBackoff, sleepWithAbort } from "../infra/backoff.js";
@@ -164,6 +165,19 @@ export async function monitorTelegramProvider(opts: MonitorTelegramOpts = {}) {
         publicUrl: opts.webhookUrl,
       });
       return;
+    }
+
+    // Start voice bridge (gramjs userbot) if enabled
+    let voiceHandle: Awaited<ReturnType<typeof startTelegramVoice>> = null;
+    try {
+      voiceHandle = await startTelegramVoice(cfg, {
+        abortSignal: opts.abortSignal,
+        log: opts.runtime?.error ?? console.log,
+      });
+    } catch (err) {
+      (opts.runtime?.error ?? console.error)(
+        `[telegram] Voice bridge failed to start: ${String(err)}`,
+      );
     }
 
     // Use grammyjs/runner for concurrent update processing

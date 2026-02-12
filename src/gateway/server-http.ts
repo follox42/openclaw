@@ -44,6 +44,7 @@ import { resolveGatewayClientIp } from "./net.js";
 import { handleOpenAiHttpRequest } from "./openai-http.js";
 import { handleOpenResponsesHttpRequest } from "./openresponses-http.js";
 import { handleToolsInvokeHttpRequest } from "./tools-invoke-http.js";
+import { createVoiceWss } from "./voice-ws.js";
 
 type SubsystemLogger = ReturnType<typeof createSubsystemLogger>;
 
@@ -417,8 +418,21 @@ export function attachGatewayUpgradeHandler(opts: {
   resolvedAuth: ResolvedGatewayAuth;
 }) {
   const { httpServer, wss, canvasHost, clients, resolvedAuth } = opts;
+
+  // Voice WebSocket endpoint
+  const configSnapshot = loadConfig();
+  const voiceWss = createVoiceWss({
+    resolvedAuth,
+    trustedProxies: configSnapshot.gateway?.trustedProxies,
+  });
+
   httpServer.on("upgrade", (req, socket, head) => {
     void (async () => {
+      // Voice WebSocket: /voice/ws
+      if (voiceWss.handleUpgrade(req, socket, head)) {
+        return;
+      }
+
       if (canvasHost) {
         const url = new URL(req.url ?? "/", "http://localhost");
         if (url.pathname === CANVAS_WS_PATH) {
