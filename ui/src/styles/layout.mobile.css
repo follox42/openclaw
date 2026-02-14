@@ -51,6 +51,15 @@
   .shell {
     --shell-pad: 0px;
     --shell-gap: 0px;
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    overflow: hidden !important;
+  }
+
+  .shell--chat {
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    overflow: hidden !important;
   }
 
   /* ---- TOPBAR: compact single line ---- */
@@ -183,6 +192,9 @@
   .content--chat {
     gap: 0 !important;
     padding-bottom: 0 !important;
+    overflow: hidden !important;
+    flex: 1 !important;
+    min-height: 0 !important;
   }
 
   /* ---- CHAT CARD: remove card styling ---- */
