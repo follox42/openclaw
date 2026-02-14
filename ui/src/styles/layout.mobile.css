@@ -1,5 +1,5 @@
 /* ===========================================
-   Mobile Layout
+   Mobile Layout — Messaging App Style
    =========================================== */
 
 /* Tablet: Horizontal nav */
@@ -44,21 +44,31 @@
   }
 }
 
-/* Mobile-specific styles */
+/* =========================================
+   MOBILE — Full messaging app redesign
+   ========================================= */
 @media (max-width: 600px) {
   .shell {
-    --shell-pad: 8px;
-    --shell-gap: 8px;
+    --shell-pad: 0px;
+    --shell-gap: 0px;
   }
 
-  /* Topbar */
+  /* ---- TOPBAR: compact single line ---- */
   .topbar {
-    padding: 10px 12px;
+    padding: 6px 12px !important;
+    gap: 6px !important;
+    height: 42px !important;
+    min-height: 42px !important;
+    flex-wrap: nowrap !important;
+  }
+
+  .topbar-left {
     gap: 8px;
-    flex-direction: row;
-    flex-wrap: wrap;
-    justify-content: space-between;
-    align-items: center;
+  }
+
+  .topbar .nav-collapse-toggle {
+    width: 28px;
+    height: 28px;
   }
 
   .brand {
@@ -66,44 +76,72 @@
     min-width: 0;
   }
 
+  .brand-logo {
+    width: 22px;
+    height: 22px;
+  }
+
   .brand-title {
-    font-size: 14px;
+    font-size: 13px !important;
   }
 
   .brand-sub {
-    display: none;
+    display: none !important;
   }
 
+  /* Hide most status pills, keep only the dot */
   .topbar-status {
-    gap: 6px;
-    width: auto;
-    flex-wrap: nowrap;
+    gap: 4px !important;
+    flex-wrap: nowrap !important;
   }
 
   .topbar-status .pill {
-    padding: 4px 8px;
-    font-size: 11px;
-    gap: 4px;
+    padding: 3px 6px !important;
+    font-size: 10px !important;
+    gap: 3px !important;
+    height: 24px !important;
   }
 
   .topbar-status .pill .mono {
-    display: none;
+    display: none !important;
   }
 
   .topbar-status .pill span:nth-child(2) {
-    display: none;
+    display: none !important;
   }
 
-  /* Nav */
+  .theme-toggle {
+    --theme-item: 20px !important;
+    --theme-gap: 2px !important;
+    --theme-pad: 2px !important;
+  }
+
+  .theme-icon {
+    width: 10px !important;
+    height: 10px !important;
+  }
+
+  /* ---- NAV: ultra-compact thin strip ---- */
   .nav {
-    padding: 8px 10px;
-    gap: 4px;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
+    padding: 2px 8px !important;
+    gap: 2px !important;
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    scrollbar-width: none !important;
+    border-bottom: 1px solid var(--border) !important;
+    flex-wrap: nowrap !important;
+    min-height: 0 !important;
   }
 
   .nav::-webkit-scrollbar {
-    display: none;
+    display: none !important;
+  }
+
+  /* Hide nav when collapsed or in chat focus */
+  .shell.shell--nav-collapsed .nav,
+  .shell.shell--chat-focus .nav,
+  .nav--collapsed {
+    display: none !important;
   }
 
   .nav-group {
@@ -111,38 +149,194 @@
   }
 
   .nav-label {
-    display: none;
+    display: none !important;
   }
 
   .nav-item {
-    padding: 6px 10px;
-    font-size: 12px;
-    border-radius: var(--radius-md);
-    white-space: nowrap;
-    flex-shrink: 0;
+    padding: 4px 8px !important;
+    font-size: 11px !important;
+    border-radius: var(--radius-md) !important;
+    white-space: nowrap !important;
+    flex-shrink: 0 !important;
   }
 
-  /* Content */
+  .nav-item__icon {
+    width: 14px !important;
+    height: 14px !important;
+  }
+
+  .nav-item__icon svg {
+    width: 14px !important;
+    height: 14px !important;
+  }
+
+  /* ---- CONTENT: edge-to-edge ---- */
   .content-header {
-    display: none;
+    display: none !important;
   }
 
   .content {
-    padding: 4px 4px 16px;
-    gap: 12px;
+    padding: 0 !important;
+    gap: 0 !important;
   }
 
-  /* Cards */
+  .content--chat {
+    gap: 0 !important;
+    padding-bottom: 0 !important;
+  }
+
+  /* ---- CHAT CARD: remove card styling ---- */
+  .card.chat,
+  .chat {
+    border-radius: 0 !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+  }
+
   .card {
-    padding: 12px;
-    border-radius: var(--radius-md);
+    padding: 8px !important;
+    border-radius: var(--radius-md) !important;
   }
 
+  /* ---- CHAT THREAD: full width messages ---- */
+  .chat-thread {
+    padding: 8px 6px !important;
+    margin: 0 !important;
+    border-radius: 0 !important;
+  }
+
+  /* Messages use near-full width */
+  .chat-msg {
+    max-width: 92% !important;
+  }
+
+  .chat-bubble {
+    padding: 8px 12px !important;
+    border-radius: 16px !important;
+    font-size: 14px !important;
+  }
+
+  /* Rounder bubbles like messaging apps */
+  .chat-line.user .chat-bubble {
+    border-bottom-right-radius: 4px !important;
+  }
+
+  .chat-line.assistant .chat-bubble {
+    border-bottom-left-radius: 4px !important;
+  }
+
+  .chat-stamp {
+    font-size: 10px !important;
+  }
+
+  /* Tool cards: compact */
+  .chat-tool-card {
+    padding: 6px 8px !important;
+    font-size: 11px !important;
+  }
+
+  .chat-tool-card__title {
+    font-size: 11px !important;
+  }
+
+  /* ---- COMPOSE: WhatsApp-style ---- */
+  .chat-compose {
+    gap: 4px !important;
+    padding: 4px 6px 6px !important;
+    margin-top: 0 !important;
+    border-top: 1px solid var(--border) !important;
+    background: var(--bg) !important;
+  }
+
+  :root[data-theme="light"] .chat-compose {
+    background: var(--bg-content) !important;
+  }
+
+  .chat-compose__row {
+    display: flex !important;
+    flex-direction: row !important;
+    gap: 6px !important;
+    align-items: flex-end !important;
+  }
+
+  /* Textarea: single-line rounded input */
+  .chat-compose .chat-compose__field textarea,
+  .chat-compose__field textarea {
+    min-height: 36px !important;
+    height: 36px !important;
+    max-height: 100px !important;
+    padding: 7px 14px !important;
+    border-radius: 20px !important;
+    font-size: 14px !important;
+    line-height: 1.4 !important;
+    resize: none !important;
+  }
+
+  .chat-compose__field textarea::placeholder {
+    font-size: 13px !important;
+  }
+
+  /* Actions: horizontal compact */
+  .chat-compose__actions,
+  .chat-compose .chat-compose__actions {
+    flex-direction: row !important;
+    gap: 4px !important;
+    align-items: flex-end !important;
+    flex-shrink: 0 !important;
+  }
+
+  /* Hide "New session" / "Stop" button on mobile — keep only Send */
+  .chat-compose__actions .btn:not(.primary) {
+    display: none !important;
+  }
+
+  /* Send button: compact rounded */
+  .chat-compose .chat-compose__actions .btn.primary,
+  .chat-compose__actions .btn.primary {
+    padding: 0 14px !important;
+    font-size: 13px !important;
+    height: 36px !important;
+    min-height: 36px !important;
+    max-height: 36px !important;
+    border-radius: 20px !important;
+    white-space: nowrap !important;
+  }
+
+  .btn-kbd {
+    display: none !important;
+  }
+
+  /* ---- CHAT HEADER: hide on mobile ---- */
+  .chat-header {
+    display: none !important;
+  }
+
+  .chat-controls {
+    gap: 6px !important;
+  }
+
+  .chat-controls__separator {
+    display: none !important;
+  }
+
+  /* ---- FOCUS MODE: no extra padding ---- */
+  .shell--chat-focus .chat-compose {
+    padding-bottom: 6px !important;
+  }
+
+  /* ---- QUEUE: compact ---- */
+  .chat-queue {
+    margin: 4px 6px !important;
+    padding: 8px !important;
+    border-radius: var(--radius-md) !important;
+  }
+
+  /* ---- OTHER VIEWS: compact cards ---- */
   .card-title {
     font-size: 13px;
   }
 
-  /* Stats */
   .stat-grid {
     gap: 8px;
     grid-template-columns: repeat(2, 1fr);
@@ -161,13 +355,11 @@
     font-size: 18px;
   }
 
-  /* Notes */
   .note-grid {
     grid-template-columns: 1fr;
     gap: 8px;
   }
 
-  /* Forms */
   .form-grid {
     grid-template-columns: 1fr;
     gap: 10px;
@@ -181,93 +373,14 @@
     font-size: 14px;
   }
 
-  /* Buttons */
   .btn {
     padding: 8px 12px;
     font-size: 12px;
   }
 
-  /* Pills */
   .pill {
     padding: 4px 10px;
     font-size: 12px;
-  }
-
-  /* Chat */
-  .chat-header {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 8px;
-  }
-
-  .chat-header__left {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .chat-header__right {
-    justify-content: space-between;
-  }
-
-  .chat-session {
-    min-width: unset;
-    width: 100%;
-  }
-
-  .chat-thread {
-    margin-top: 8px;
-    padding: 12px 8px;
-  }
-
-  .chat-msg {
-    max-width: 90%;
-  }
-
-  .chat-bubble {
-    padding: 8px 12px;
-    border-radius: var(--radius-md);
-  }
-
-  .chat-compose {
-    gap: 6px;
-    padding: 8px 4px 4px;
-  }
-
-  .chat-compose__row {
-    gap: 8px;
-  }
-
-  .chat-compose__field textarea {
-    min-height: 40px;
-    height: 40px;
-    padding: 8px 10px;
-    border-radius: var(--radius-md);
-    font-size: 14px;
-  }
-
-  /* Shorten placeholder on mobile */
-  .chat-compose__field textarea::placeholder {
-    font-size: 13px;
-  }
-
-  .chat-compose .chat-compose__actions .btn {
-    padding: 0 12px;
-    font-size: 12px;
-    height: 40px;
-    min-height: 40px;
-  }
-
-  /* Hide keyboard shortcut hints on mobile */
-  .btn-kbd {
-    display: none;
-  }
-
-  .chat-controls {
-    gap: 6px;
-  }
-
-  .chat-controls__separator {
-    display: none;
   }
 
   /* Log stream */
@@ -285,15 +398,12 @@
   .log-time {
     font-size: 10px;
   }
-
   .log-level {
     font-size: 9px;
   }
-
   .log-subsystem {
     font-size: 11px;
   }
-
   .log-message {
     font-size: 12px;
   }
@@ -307,7 +417,6 @@
   .list-title {
     font-size: 13px;
   }
-
   .list-sub {
     font-size: 11px;
   }
@@ -319,88 +428,65 @@
     font-size: 11px;
   }
 
-  /* Theme toggle */
-  .theme-toggle {
-    --theme-item: 24px;
-    --theme-gap: 2px;
-    --theme-pad: 3px;
+  /* Chat message images */
+  .chat-message-image {
+    max-width: 200px !important;
+    max-height: 150px !important;
   }
 
-  .theme-icon {
-    width: 12px;
-    height: 12px;
+  /* Chat split container — no sidebar on mobile */
+  .chat-split-container--open .chat-sidebar {
+    display: none !important;
+  }
+
+  .chat-split-container--open .chat-main {
+    flex: 1 1 100% !important;
+  }
+
+  .chat-split-container--open resizable-divider {
+    display: none !important;
+  }
+
+  /* New messages indicator */
+  .chat-new-messages {
+    font-size: 12px !important;
+    padding: 4px 12px !important;
+  }
+
+  /* Compaction indicator */
+  .compaction-indicator {
+    font-size: 11px !important;
+    padding: 4px 10px !important;
+  }
+
+  /* Attachments */
+  .chat-attachments {
+    padding: 4px !important;
+    gap: 4px !important;
+  }
+
+  .chat-attachment {
+    width: 60px !important;
+    height: 60px !important;
   }
 }
 
 /* Small mobile */
 @media (max-width: 400px) {
-  .shell {
-    --shell-pad: 4px;
-  }
-
   .topbar {
-    padding: 8px 10px;
+    padding: 6px 8px !important;
   }
 
   .brand-title {
-    font-size: 13px;
-  }
-
-  .nav {
-    padding: 6px 8px;
-  }
-
-  .nav-item {
-    padding: 6px 8px;
-    font-size: 11px;
-  }
-
-  .content {
-    padding: 4px 4px 12px;
-    gap: 10px;
-  }
-
-  .card {
-    padding: 10px;
-  }
-
-  .stat {
-    padding: 8px;
-  }
-
-  .stat-value {
-    font-size: 16px;
+    font-size: 12px !important;
   }
 
   .chat-bubble {
-    padding: 8px 10px;
+    padding: 7px 10px !important;
   }
 
-  .chat-compose__field textarea {
-    min-height: 38px;
-    height: 38px;
-    padding: 8px 10px;
-    font-size: 13px;
-  }
-
-  .btn {
-    padding: 6px 10px;
-    font-size: 11px;
-  }
-
-  .topbar-status .pill {
-    padding: 3px 6px;
-    font-size: 10px;
-  }
-
-  .theme-toggle {
-    --theme-item: 22px;
-    --theme-gap: 2px;
-    --theme-pad: 2px;
-  }
-
-  .theme-icon {
-    width: 11px;
-    height: 11px;
+  .chat-compose .chat-compose__actions .btn.primary {
+    padding: 0 10px !important;
+    font-size: 12px !important;
   }
 }
