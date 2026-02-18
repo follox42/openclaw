@@ -95,17 +95,26 @@ function createStreamFnWithExtraParams(
     streamParams.cacheRetention = cacheRetention;
   }
 
-  if (Object.keys(streamParams).length === 0) {
+  // Support custom headers passthrough (e.g., anthropic-beta for 1M context)
+  const extraHeaders =
+    extraParams.headers && typeof extraParams.headers === "object"
+      ? (extraParams.headers as Record<string, string>)
+      : undefined;
+
+  if (Object.keys(streamParams).length === 0 && !extraHeaders) {
     return undefined;
   }
 
-  log.debug(`creating streamFn wrapper with params: ${JSON.stringify(streamParams)}`);
+  log.debug(
+    `creating streamFn wrapper with params: ${JSON.stringify(streamParams)}${extraHeaders ? ` headers: ${JSON.stringify(extraHeaders)}` : ""}`,
+  );
 
   const underlying = baseStreamFn ?? streamSimple;
   const wrappedStreamFn: StreamFn = (model, context, options) =>
     underlying(model, context, {
       ...streamParams,
       ...options,
+      ...(extraHeaders ? { headers: { ...extraHeaders, ...options?.headers } } : {}),
     });
 
   return wrappedStreamFn;
