@@ -160,6 +160,7 @@ export const TelegramAccountSchemaBase = z
     network: z
       .object({
         autoSelectFamily: z.boolean().optional(),
+        dnsResultOrder: z.enum(["ipv4first", "verbatim"]).optional(),
       })
       .strict()
       .optional(),
@@ -168,6 +169,7 @@ export const TelegramAccountSchemaBase = z
     webhookSecret: z.string().optional().register(sensitive),
     webhookPath: z.string().optional(),
     webhookHost: z.string().optional(),
+    webhookPort: z.number().int().positive().optional(),
     actions: z
       .object({
         reactions: z.boolean().optional(),
@@ -611,7 +613,7 @@ export const SlackAccountSchema = z
     userTokenReadOnly: z.boolean().optional().default(true),
     allowBots: z.boolean().optional(),
     requireMention: z.boolean().optional(),
-    groupPolicy: GroupPolicySchema.optional().default("allowlist"),
+    groupPolicy: GroupPolicySchema.optional(),
     historyLimit: z.number().int().min(0).optional(),
     dmHistoryLimit: z.number().int().min(0).optional(),
     dms: z.record(z.string(), DmConfigSchema.optional()).optional(),
@@ -683,6 +685,7 @@ export const SlackConfigSchema = SlackAccountSchema.safeExtend({
   mode: z.enum(["socket", "http"]).optional().default("socket"),
   signingSecret: z.string().optional().register(sensitive),
   webhookPath: z.string().optional().default("/slack/events"),
+  groupPolicy: GroupPolicySchema.optional().default("allowlist"),
   accounts: z.record(z.string(), SlackAccountSchema.optional()).optional(),
 }).superRefine((value, ctx) => {
   const baseMode = value.mode ?? "socket";
