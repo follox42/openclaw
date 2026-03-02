@@ -14,10 +14,17 @@ import { createImageTool } from "./tools/image-tool.js";
 import { createMessageTool } from "./tools/message-tool.js";
 import { createNodesTool } from "./tools/nodes-tool.js";
 import { createSessionStatusTool } from "./tools/session-status-tool.js";
+import {
+  createSessionsChannelPublishTool,
+  createSessionsChannelPollTool,
+  createSessionsChannelListTool,
+} from "./tools/sessions-channel-tool.js";
+import { createSessionsConsensusTool } from "./tools/sessions-consensus-tool.js";
 import { createSessionsHistoryTool } from "./tools/sessions-history-tool.js";
 import { createSessionsListTool } from "./tools/sessions-list-tool.js";
 import { createSessionsSendTool } from "./tools/sessions-send-tool.js";
 import { createSessionsSpawnTool } from "./tools/sessions-spawn-tool.js";
+import { createSessionsSwarmTool } from "./tools/sessions-swarm-tool.js";
 import { createSubagentsTool } from "./tools/subagents-tool.js";
 import { createTtsTool } from "./tools/tts-tool.js";
 import { createWebFetchTool, createWebSearchTool } from "./tools/web-tools.js";
@@ -164,6 +171,20 @@ export function createOpenClawTools(options?: {
       requesterAgentIdOverride: options?.requesterAgentIdOverride,
     }),
     createSubagentsTool({
+      agentSessionKey: options?.agentSessionKey,
+    }),
+    // ─── Swarm Core Tools ──────────────────────────────────────────────────
+    createSessionsChannelPublishTool({
+      agentSessionKey: options?.agentSessionKey,
+    }),
+    createSessionsChannelPollTool({
+      agentSessionKey: options?.agentSessionKey,
+    }),
+    createSessionsChannelListTool(),
+    createSessionsConsensusTool({
+      agentSessionKey: options?.agentSessionKey,
+    }),
+    createSessionsSwarmTool({
       agentSessionKey: options?.agentSessionKey,
     }),
     createSessionStatusTool({

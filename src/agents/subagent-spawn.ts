@@ -16,6 +16,8 @@ import { resolveSubagentSpawnModelSelection } from "./model-selection.js";
 import { buildSubagentSystemPrompt } from "./subagent-announce.js";
 import { getSubagentDepthFromSessionStore } from "./subagent-depth.js";
 import { countActiveRunsForSession, registerSubagentRun } from "./subagent-registry.js";
+import { createSwarm, addMember, getSwarm, buildSwarmContextPrompt } from "./swarm/topology.js";
+import type { SwarmTopology, ConsensusAlgorithm } from "./swarm/types.js";
 import { readStringParam } from "./tools/common.js";
 import {
   resolveDisplaySessionKey,
@@ -37,6 +39,17 @@ export type SpawnSubagentParams = {
   mode?: SpawnSubagentMode;
   cleanup?: "delete" | "keep";
   expectsCompletionMessage?: boolean;
+  /** Swarm options — enables multi-agent coordination beyond hub-spoke */
+  swarm?: {
+    /** Join an existing swarm (creates new if not found) */
+    swarmId?: string;
+    /** Topology: star (default), mesh, hierarchical, ring */
+    topology?: SwarmTopology;
+    /** Consensus algorithm: none (default), raft, bft, gossip, vote */
+    consensus?: ConsensusAlgorithm;
+    /** Role for this agent in the swarm */
+    role?: string;
+  };
 };
 
 export type SpawnSubagentContext = {
@@ -393,11 +406,61 @@ export async function spawnSubagentDirect(
     childDepth,
     maxSpawnDepth,
   });
+  // ─── Swarm Integration ────────────────────────────────────────────────────
+  // If swarm options provided, register this agent in the swarm and compute peers.
+  let swarmContextPrompt: string | undefined;
+  if (params.swarm) {
+    try {
+      const swarmOpts = params.swarm;
+      let targetSwarmId = swarmOpts.swarmId;
+
+      // Create swarm if no ID provided, or get existing
+      if (!targetSwarmId) {
+        const newSwarm = createSwarm({
+          topology: swarmOpts.topology ?? "star",
+          consensus: swarmOpts.consensus ?? "none",
+        });
+        targetSwarmId = newSwarm.swarmId;
+      } else {
+        // Create if not found
+        const existing = getSwarm(targetSwarmId);
+        if (!existing) {
+          createSwarm({
+            topology: swarmOpts.topology ?? "star",
+            consensus: swarmOpts.consensus ?? "none",
+          });
+        }
+      }
+
+      // Add this child to the swarm
+      const swarmState = addMember(targetSwarmId, {
+        sessionKey: childSessionKey,
+        agentId: targetAgentId,
+        role: swarmOpts.role,
+      });
+
+      if (swarmState) {
+        const peers = swarmState.members.find((m) => m.sessionKey === childSessionKey)?.peers ?? [];
+        swarmContextPrompt = buildSwarmContextPrompt({
+          swarmId: targetSwarmId,
+          topology: swarmState.topology,
+          sessionKey: childSessionKey,
+          peers,
+          role: swarmOpts.role,
+          consensus: swarmState.consensus,
+        });
+      }
+    } catch {
+      // Swarm errors are non-fatal — don't block spawn
+    }
+  }
+
   const childTaskMessage = [
     `[Subagent Context] You are running as a subagent (depth ${childDepth}/${maxSpawnDepth}). Results auto-announce to your requester; do not busy-poll for status.`,
     spawnMode === "session"
       ? "[Subagent Context] This subagent session is persistent and remains available for thread follow-up messages."
       : undefined,
+    swarmContextPrompt,
     `[Subagent Task]: ${task}`,
   ]
     .filter((line): line is string => Boolean(line))

@@ -3,6 +3,7 @@ import type { GatewayMessageChannel } from "../../utils/message-channel.js";
 import { ACP_SPAWN_MODES, spawnAcpDirect } from "../acp-spawn.js";
 import { optionalStringEnum } from "../schema/typebox.js";
 import { SUBAGENT_SPAWN_MODES, spawnSubagentDirect } from "../subagent-spawn.js";
+import { SWARM_TOPOLOGIES, CONSENSUS_ALGORITHMS } from "../swarm/types.js";
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readStringParam } from "./common.js";
 
@@ -22,6 +23,37 @@ const SessionsSpawnToolSchema = Type.Object({
   thread: Type.Optional(Type.Boolean()),
   mode: optionalStringEnum(SUBAGENT_SPAWN_MODES),
   cleanup: optionalStringEnum(["delete", "keep"] as const),
+  // ─── Swarm Options ──────────────────────────────────────────────────────────
+  // Optional swarm integration. When provided, agents are registered in a swarm
+  // and receive peer information enabling direct agent↔agent communication.
+  topology: Type.Optional(
+    Type.Union(
+      SWARM_TOPOLOGIES.map((t) => Type.Literal(t)),
+      {
+        description:
+          "Swarm topology: star (default, backward-compat), mesh (P2P), hierarchical (leader+workers), ring (pipeline)",
+      },
+    ),
+  ),
+  swarmId: Type.Optional(
+    Type.String({
+      description: "Join an existing swarm by ID. Creates new swarm if not found.",
+    }),
+  ),
+  swarmRole: Type.Optional(
+    Type.String({
+      description: "Role for this agent in the swarm (e.g. researcher, coder, analyst)",
+    }),
+  ),
+  consensus: Type.Optional(
+    Type.Union(
+      CONSENSUS_ALGORITHMS.map((c) => Type.Literal(c)),
+      {
+        description:
+          "Consensus algorithm: none (default), raft (leader election), bft (Byzantine fault-tolerant), gossip, vote",
+      },
+    ),
+  ),
 });
 
 export function createSessionsSpawnTool(opts?: {
@@ -41,7 +73,8 @@ export function createSessionsSpawnTool(opts?: {
     label: "Sessions",
     name: "sessions_spawn",
     description:
-      'Spawn an isolated session (runtime="subagent" or runtime="acp"). mode="run" is one-shot and mode="session" is persistent/thread-bound.',
+      'Spawn an isolated session (runtime="subagent" or runtime="acp"). mode="run" is one-shot and mode="session" is persistent/thread-bound. ' +
+      'Swarm support: set topology="mesh" or topology="hierarchical" with optional swarmId to enable direct agent↔agent communication.',
     parameters: SessionsSpawnToolSchema,
     execute: async (_toolCallId, args) => {
       const params = args as Record<string, unknown>;
@@ -67,6 +100,26 @@ export function createSessionsSpawnTool(opts?: {
           ? Math.max(0, Math.floor(timeoutSecondsCandidate))
           : undefined;
       const thread = params.thread === true;
+
+      // ─── Swarm Options ─────────────────────────────────────────────────────
+      const topologyRaw = readStringParam(params, "topology");
+      const topology = SWARM_TOPOLOGIES.includes(topologyRaw as (typeof SWARM_TOPOLOGIES)[number])
+        ? (topologyRaw as (typeof SWARM_TOPOLOGIES)[number])
+        : undefined;
+      const swarmId = readStringParam(params, "swarmId") ?? undefined;
+      const swarmRole = readStringParam(params, "swarmRole") ?? undefined;
+      const consensusRaw = readStringParam(params, "consensus");
+      const consensus = CONSENSUS_ALGORITHMS.includes(
+        consensusRaw as (typeof CONSENSUS_ALGORITHMS)[number],
+      )
+        ? (consensusRaw as (typeof CONSENSUS_ALGORITHMS)[number])
+        : undefined;
+
+      // Build swarm options only if any swarm param is provided
+      const swarmOptions =
+        topology || swarmId || swarmRole || consensus
+          ? { topology, swarmId, role: swarmRole, consensus }
+          : undefined;
 
       const result =
         runtime === "acp"
@@ -99,6 +152,7 @@ export function createSessionsSpawnTool(opts?: {
                 mode,
                 cleanup,
                 expectsCompletionMessage: true,
+                swarm: swarmOptions,
               },
               {
                 agentSessionKey: opts?.agentSessionKey,

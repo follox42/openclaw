@@ -41,6 +41,8 @@ import {
   restoreSubagentRunsFromDisk,
 } from "./subagent-registry-state.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
+import { runLearningLoop } from "./swarm/learning.js";
+import { complexityToTier, estimateTaskComplexity } from "./swarm/router.js";
 import { resolveAgentTimeoutMs } from "./timeout.js";
 
 export type { SubagentRunRecord } from "./subagent-registry.types.js";
@@ -345,6 +347,39 @@ async function completeSubagentRun(params: {
 
   if (mutated) {
     persistSubagentRuns();
+  }
+
+  // ─── Swarm Learning Loop Hook ──────────────────────────────────────────────
+  // After each subagent completes, record metrics for Q-Learning router.
+  // Non-blocking — failures must not affect the announce flow.
+  try {
+    const complexity = estimateTaskComplexity(entry.task ?? "");
+    const tier = complexityToTier(complexity);
+    const agentId = resolveAgentIdFromSessionKey(entry.childSessionKey) ?? "unknown";
+    const durationMs =
+      entry.endedAt && entry.startedAt ? entry.endedAt - entry.startedAt : undefined;
+    let outcome: "success" | "error" | "timeout" | "killed" = "success";
+    if (params.outcome.status === "error") {
+      outcome = "error";
+    } else if (params.reason === SUBAGENT_ENDED_REASON_KILLED) {
+      outcome = "killed";
+    }
+    void runLearningLoop({
+      taskId: entry.runId,
+      sessionKey: entry.childSessionKey,
+      agentId,
+      model: entry.model,
+      label: entry.label,
+      taskDescription: entry.task ?? "",
+      complexityScore: complexity,
+      tier,
+      startedAt: entry.startedAt ?? entry.createdAt,
+      completedAt: entry.endedAt,
+      durationMs,
+      outcome,
+    });
+  } catch {
+    // Learning errors are non-fatal
   }
 
   const suppressedForSteerRestart = suppressAnnounceForSteerRestart(entry);
