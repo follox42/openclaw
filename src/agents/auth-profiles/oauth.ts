@@ -10,6 +10,7 @@ import { withFileLock } from "../../infra/file-lock.js";
 import { refreshQwenPortalCredentials } from "../../providers/qwen-portal-oauth.js";
 import { resolveSecretRefString, type SecretRefResolveCache } from "../../secrets/resolve.js";
 import { refreshChutesTokens } from "../chutes-oauth.js";
+import { writeClaudeCliCredentials } from "../cli-credentials.js";
 import { AUTH_STORE_LOCK_OPTIONS, log } from "./constants.js";
 import { formatAuthDoctorHint } from "./doctor.js";
 import { ensureAuthStoreFile, resolveAuthStorePath } from "./paths.js";
@@ -147,7 +148,7 @@ async function refreshOAuthTokenWithLock(params: {
 
   return await withFileLock(authPath, AUTH_STORE_LOCK_OPTIONS, async () => {
     const store = ensureAuthProfileStore(params.agentDir);
-    const cred = store.profiles[params.profileId];
+    let cred = store.profiles[params.profileId];
     if (!cred || cred.type !== "oauth") {
       return null;
     }
@@ -157,6 +158,30 @@ async function refreshOAuthTokenWithLock(params: {
         apiKey: buildOAuthApiKey(cred.provider, cred),
         newCredentials: cred,
       };
+    }
+
+    // Before attempting a refresh, check if Claude Code has already refreshed
+    // the token. This prevents double-refresh which invalidates the refresh token.
+    if (cred.provider === "anthropic") {
+      const { readClaudeCliCredentials } = await import("../cli-credentials.js");
+      const freshCreds = readClaudeCliCredentials();
+      if (
+        freshCreds?.type === "oauth" &&
+        freshCreds.provider === "anthropic" &&
+        freshCreds.expires > Date.now()
+      ) {
+        log.info("adopted fresher OAuth credentials from Claude CLI before refresh", {
+          profileId: params.profileId,
+          expires: new Date(freshCreds.expires).toISOString(),
+        });
+        store.profiles[params.profileId] = { ...cred, ...freshCreds, type: "oauth" };
+        saveAuthProfileStore(store, params.agentDir);
+        cred = store.profiles[params.profileId] as typeof cred;
+        return {
+          apiKey: buildOAuthApiKey(cred.provider, cred),
+          newCredentials: cred,
+        };
+      }
     }
 
     const oauthCreds: Record<string, OAuthCredentials> = {
@@ -192,6 +217,12 @@ async function refreshOAuthTokenWithLock(params: {
       type: "oauth",
     };
     saveAuthProfileStore(store, params.agentDir);
+
+    // Write-back: keep Claude Code's credentials file in sync so token rotation
+    // doesn't invalidate Claude Code when openclaw refreshes first.
+    if (cred.provider === "anthropic") {
+      writeClaudeCliCredentials(result.newCredentials);
+    }
 
     return result;
   });
