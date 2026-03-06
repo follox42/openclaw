@@ -21,6 +21,21 @@ import {
   waitForDescendantSubagentSummary,
 } from "./subagent-followup.js";
 
+function normalizeDeliveryTarget(channel: string, to: string): string {
+  const channelLower = channel.trim().toLowerCase();
+  const toTrimmed = to.trim();
+  if (channelLower === "feishu" || channelLower === "lark") {
+    const lowered = toTrimmed.toLowerCase();
+    if (lowered.startsWith("user:")) {
+      return toTrimmed.slice("user:".length).trim();
+    }
+    if (lowered.startsWith("chat:")) {
+      return toTrimmed.slice("chat:".length).trim();
+    }
+  }
+  return toTrimmed;
+}
+
 export function matchesMessagingToolDeliveryTarget(
   target: { provider?: string; to?: string; accountId?: string },
   delivery: { channel?: string; to?: string; accountId?: string },
@@ -36,11 +51,11 @@ export function matchesMessagingToolDeliveryTarget(
   if (target.accountId && delivery.accountId && target.accountId !== delivery.accountId) {
     return false;
   }
-  // Strip :topic:NNN suffix from target.to before comparing — the cron delivery.to
-  // is already stripped to chatId only, but the agent's message tool may pass a
-  // topic-qualified target (e.g. "-1003597428309:topic:462").
-  const normalizedTargetTo = target.to.replace(/:topic:\d+$/, "");
-  return normalizedTargetTo === delivery.to;
+  // Strip :topic:NNN from message targets and normalize Feishu/Lark prefixes on
+  // both sides so cron duplicate suppression compares canonical IDs.
+  const normalizedTargetTo = normalizeDeliveryTarget(channel, target.to.replace(/:topic:\d+$/, ""));
+  const normalizedDeliveryTo = normalizeDeliveryTarget(channel, delivery.to);
+  return normalizedTargetTo === normalizedDeliveryTo;
 }
 
 export function resolveCronDeliveryBestEffort(job: CronJob): boolean {
@@ -238,7 +253,19 @@ export async function dispatchCronDelivery(
     const initialSynthesizedText = synthesizedText.trim();
     let activeSubagentRuns = countActiveDescendantRuns(params.agentSessionKey);
     const expectedSubagentFollowup = expectsSubagentFollowup(initialSynthesizedText);
-    const hadActiveDescendants = activeSubagentRuns > 0;
+    // Also check for already-completed descendants. If the subagent finished
+    // before delivery-dispatch runs, activeSubagentRuns is 0 and
+    // expectedSubagentFollowup may be false (e.g. cron said "on it" which
+    // doesn't match the narrow hint list). We still need to use the
+    // descendant's output instead of the interim cron text.
+    const completedDescendantReply =
+      activeSubagentRuns === 0 && isLikelyInterimCronMessage(initialSynthesizedText)
+        ? await readDescendantSubagentFallbackReply({
+            sessionKey: params.agentSessionKey,
+            runStartedAt: params.runStartedAt,
+          })
+        : undefined;
+    const hadDescendants = activeSubagentRuns > 0 || Boolean(completedDescendantReply);
     if (activeSubagentRuns > 0 || expectedSubagentFollowup) {
       let finalReply = await waitForDescendantSubagentSummary({
         sessionKey: params.agentSessionKey,
@@ -247,11 +274,7 @@ export async function dispatchCronDelivery(
         observedActiveDescendants: activeSubagentRuns > 0 || expectedSubagentFollowup,
       });
       activeSubagentRuns = countActiveDescendantRuns(params.agentSessionKey);
-      if (
-        !finalReply &&
-        activeSubagentRuns === 0 &&
-        (hadActiveDescendants || expectedSubagentFollowup)
-      ) {
+      if (!finalReply && activeSubagentRuns === 0) {
         finalReply = await readDescendantSubagentFallbackReply({
           sessionKey: params.agentSessionKey,
           runStartedAt: params.runStartedAt,
@@ -263,6 +286,13 @@ export async function dispatchCronDelivery(
         synthesizedText = finalReply;
         deliveryPayloads = [{ text: finalReply }];
       }
+    } else if (completedDescendantReply) {
+      // Descendants already finished before we got here. Use their output
+      // directly instead of the cron agent's interim text.
+      outputText = completedDescendantReply;
+      summary = pickSummaryFromOutput(completedDescendantReply) ?? summary;
+      synthesizedText = completedDescendantReply;
+      deliveryPayloads = [{ text: completedDescendantReply }];
     }
     if (activeSubagentRuns > 0) {
       // Parent orchestration is still in progress; avoid announcing a partial
@@ -270,13 +300,14 @@ export async function dispatchCronDelivery(
       return params.withRunSession({ status: "ok", summary, outputText, ...params.telemetry });
     }
     if (
-      (hadActiveDescendants || expectedSubagentFollowup) &&
+      hadDescendants &&
       synthesizedText.trim() === initialSynthesizedText &&
       isLikelyInterimCronMessage(initialSynthesizedText) &&
       initialSynthesizedText.toUpperCase() !== SILENT_REPLY_TOKEN.toUpperCase()
     ) {
-      // Descendants existed but no post-orchestration synthesis arrived, so
-      // suppress stale parent text like "on it, pulling everything together".
+      // Descendants existed but no post-orchestration synthesis arrived AND
+      // no descendant fallback reply was available. Suppress stale parent
+      // text like "on it, pulling everything together".
       return params.withRunSession({ status: "ok", summary, outputText, ...params.telemetry });
     }
     if (synthesizedText.toUpperCase() === SILENT_REPLY_TOKEN.toUpperCase()) {
