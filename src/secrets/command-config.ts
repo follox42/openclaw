@@ -15,16 +15,29 @@ export type ResolveAssignmentsFromSnapshotResult = {
   diagnostics: string[];
 };
 
-export function collectCommandSecretAssignmentsFromSnapshot(params: {
+export type UnresolvedCommandSecretAssignment = {
+  path: string;
+  pathSegments: string[];
+};
+
+export type AnalyzeAssignmentsFromSnapshotResult = {
+  assignments: CommandSecretAssignment[];
+  diagnostics: string[];
+  unresolved: UnresolvedCommandSecretAssignment[];
+  inactive: UnresolvedCommandSecretAssignment[];
+};
+
+export function analyzeCommandSecretAssignmentsFromSnapshot(params: {
   sourceConfig: OpenClawConfig;
   resolvedConfig: OpenClawConfig;
-  commandName: string;
   targetIds: ReadonlySet<string>;
   inactiveRefPaths?: ReadonlySet<string>;
-}): ResolveAssignmentsFromSnapshotResult {
+}): AnalyzeAssignmentsFromSnapshotResult {
   const defaults = params.sourceConfig.secrets?.defaults;
   const assignments: CommandSecretAssignment[] = [];
   const diagnostics: string[] = [];
+  const unresolved: UnresolvedCommandSecretAssignment[] = [];
+  const inactive: UnresolvedCommandSecretAssignment[] = [];
 
   for (const target of discoverConfigSecretTargetsByIds(params.sourceConfig, params.targetIds)) {
     const { explicitRef, ref } = resolveSecretInputRef({
@@ -43,11 +56,17 @@ export function collectCommandSecretAssignmentsFromSnapshot(params: {
         diagnostics.push(
           `${target.path}: secret ref is configured on an inactive surface; skipping command-time assignment.`,
         );
+        inactive.push({
+          path: target.path,
+          pathSegments: [...target.pathSegments],
+        });
         continue;
       }
-      throw new Error(
-        `${params.commandName}: ${target.path} is unresolved in the active runtime snapshot.`,
-      );
+      unresolved.push({
+        path: target.path,
+        pathSegments: [...target.pathSegments],
+      });
+      continue;
     }
 
     assignments.push({
@@ -63,5 +82,29 @@ export function collectCommandSecretAssignmentsFromSnapshot(params: {
     }
   }
 
-  return { assignments, diagnostics };
+  return { assignments, diagnostics, unresolved, inactive };
+}
+
+export function collectCommandSecretAssignmentsFromSnapshot(params: {
+  sourceConfig: OpenClawConfig;
+  resolvedConfig: OpenClawConfig;
+  commandName: string;
+  targetIds: ReadonlySet<string>;
+  inactiveRefPaths?: ReadonlySet<string>;
+}): ResolveAssignmentsFromSnapshotResult {
+  const analyzed = analyzeCommandSecretAssignmentsFromSnapshot({
+    sourceConfig: params.sourceConfig,
+    resolvedConfig: params.resolvedConfig,
+    targetIds: params.targetIds,
+    inactiveRefPaths: params.inactiveRefPaths,
+  });
+  if (analyzed.unresolved.length > 0) {
+    throw new Error(
+      `${params.commandName}: ${analyzed.unresolved[0]?.path ?? "target"} is unresolved in the active runtime snapshot.`,
+    );
+  }
+  return {
+    assignments: analyzed.assignments,
+    diagnostics: analyzed.diagnostics,
+  };
 }

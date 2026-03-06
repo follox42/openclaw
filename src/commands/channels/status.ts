@@ -1,7 +1,10 @@
+import { hasConfiguredUnavailableCredentialStatus } from "../../channels/account-snapshot-fields.js";
 import { listChannelPlugins } from "../../channels/plugins/index.js";
 import { buildChannelAccountSnapshot } from "../../channels/plugins/status.js";
 import type { ChannelAccountSnapshot } from "../../channels/plugins/types.js";
 import { formatCliCommand } from "../../cli/command-format.js";
+import { resolveCommandSecretRefsViaGateway } from "../../cli/command-secret-gateway.js";
+import { getChannelsCommandSecretTargetIds } from "../../cli/command-secret-targets.js";
 import { withProgress } from "../../cli/progress.js";
 import { type OpenClawConfig, readConfigFileSnapshot } from "../../config/config.js";
 import { callGateway } from "../../gateway/call.js";
@@ -10,7 +13,11 @@ import { formatTimeAgo } from "../../infra/format-time/format-relative.ts";
 import { defaultRuntime, type RuntimeEnv } from "../../runtime.js";
 import { formatDocsLink } from "../../terminal/links.js";
 import { theme } from "../../terminal/theme.js";
-import { type ChatChannel, formatChannelAccountLabel, requireValidConfig } from "./shared.js";
+import {
+  type ChatChannel,
+  formatChannelAccountLabel,
+  requireValidConfigSnapshot,
+} from "./shared.js";
 
 export type ChannelsStatusOptions = {
   json?: boolean;
@@ -23,7 +30,14 @@ function appendEnabledConfiguredLinkedBits(bits: string[], account: Record<strin
     bits.push(account.enabled ? "enabled" : "disabled");
   }
   if (typeof account.configured === "boolean") {
-    bits.push(account.configured ? "configured" : "not configured");
+    if (account.configured) {
+      bits.push("configured");
+      if (hasConfiguredUnavailableCredentialStatus(account)) {
+        bits.push("secret unavailable in this command path");
+      }
+    } else {
+      bits.push("not configured");
+    }
   }
   if (typeof account.linked === "boolean") {
     bits.push(account.linked ? "linked" : "not linked");
@@ -37,15 +51,19 @@ function appendModeBit(bits: string[], account: Record<string, unknown>) {
 }
 
 function appendTokenSourceBits(bits: string[], account: Record<string, unknown>) {
-  if (typeof account.tokenSource === "string" && account.tokenSource) {
-    bits.push(`token:${account.tokenSource}`);
-  }
-  if (typeof account.botTokenSource === "string" && account.botTokenSource) {
-    bits.push(`bot:${account.botTokenSource}`);
-  }
-  if (typeof account.appTokenSource === "string" && account.appTokenSource) {
-    bits.push(`app:${account.appTokenSource}`);
-  }
+  const appendSourceBit = (label: string, sourceKey: string, statusKey: string) => {
+    const source = account[sourceKey];
+    if (typeof source !== "string" || !source || source === "none") {
+      return;
+    }
+    const status = account[statusKey];
+    const unavailable = status === "configured_unavailable" ? " (unavailable)" : "";
+    bits.push(`${label}:${source}${unavailable}`);
+  };
+
+  appendSourceBit("token", "tokenSource", "tokenStatus");
+  appendSourceBit("bot", "botTokenSource", "botTokenStatus");
+  appendSourceBit("app", "appTokenSource", "appTokenStatus");
 }
 
 function appendBaseUrlBit(bits: string[], account: Record<string, unknown>) {
@@ -184,7 +202,7 @@ export function formatGatewayChannelsStatusLines(payload: Record<string, unknown
   return lines;
 }
 
-async function formatConfigChannelsStatusLines(
+export async function formatConfigChannelsStatusLines(
   cfg: OpenClawConfig,
   meta: { path?: string; mode?: "local" | "remote" },
 ): Promise<string[]> {
@@ -268,9 +286,18 @@ export async function channelsStatusCommand(
     runtime.log(formatGatewayChannelsStatusLines(payload).join("\n"));
   } catch (err) {
     runtime.error(`Gateway not reachable: ${String(err)}`);
-    const cfg = await requireValidConfig(runtime);
+    const cfg = await requireValidConfigSnapshot(runtime);
     if (!cfg) {
       return;
+    }
+    const { diagnostics } = await resolveCommandSecretRefsViaGateway({
+      config: cfg,
+      commandName: "channels status",
+      targetIds: getChannelsCommandSecretTargetIds(),
+      mode: "summary",
+    });
+    for (const entry of diagnostics) {
+      runtime.log(`[secrets] ${entry}`);
     }
     const snapshot = await readConfigFileSnapshot();
     const mode = cfg.gateway?.mode === "remote" ? "remote" : "local";

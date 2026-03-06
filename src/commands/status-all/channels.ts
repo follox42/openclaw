@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { hasConfiguredUnavailableCredentialStatus } from "../../channels/account-snapshot-fields.js";
 import {
   buildChannelAccountSnapshot,
   formatChannelAllowFrom,
@@ -12,6 +13,7 @@ import type {
   ChannelId,
   ChannelPlugin,
 } from "../../channels/plugins/types.js";
+import { inspectReadOnlyChannelAccount } from "../../channels/read-only-account-inspect.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { sha256HexPrefix } from "../../logging/redact-identifier.js";
 import { formatTimeAgo } from "./format.js";
@@ -32,8 +34,23 @@ type ChannelAccountRow = {
   snapshot: ChannelAccountSnapshot;
 };
 
+type ResolvedChannelAccountRowParams = {
+  plugin: ChannelPlugin;
+  cfg: OpenClawConfig;
+  sourceConfig: OpenClawConfig;
+  accountId: string;
+};
+
 const asRecord = (value: unknown): Record<string, unknown> =>
   value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+
+function hasResolvedCredentialValue(account: unknown): boolean {
+  const rec = asRecord(account);
+  return ["token", "botToken", "appToken", "userToken"].some((key) => {
+    const value = rec[key];
+    return typeof value === "string" && value.trim().length > 0;
+  });
+}
 
 function summarizeSources(sources: Array<string | undefined>): {
   label: string;
@@ -79,6 +96,55 @@ function formatTokenHint(token: string, opts: { showSecrets: boolean }): string 
   return `${head}…${tail} · len ${t.length}`;
 }
 
+function inspectChannelAccount(plugin: ChannelPlugin, cfg: OpenClawConfig, accountId: string) {
+  return (
+    plugin.config.inspectAccount?.(cfg, accountId) ??
+    inspectReadOnlyChannelAccount({
+      channelId: plugin.id,
+      cfg,
+      accountId,
+    })
+  );
+}
+
+async function resolveChannelAccountRow(
+  params: ResolvedChannelAccountRowParams,
+): Promise<ChannelAccountRow> {
+  const { plugin, cfg, sourceConfig, accountId } = params;
+  const sourceInspectedAccount = inspectChannelAccount(plugin, sourceConfig, accountId);
+  const resolvedInspectedAccount = inspectChannelAccount(plugin, cfg, accountId);
+  const inspectedAccount = resolvedInspectedAccount as {
+    enabled?: boolean;
+    configured?: boolean;
+  } | null;
+  const resolvedAccount = resolvedInspectedAccount ?? plugin.config.resolveAccount(cfg, accountId);
+  const account =
+    sourceInspectedAccount &&
+    hasConfiguredUnavailableCredentialStatus(sourceInspectedAccount) &&
+    !hasResolvedCredentialValue(resolvedAccount)
+      ? sourceInspectedAccount
+      : resolvedAccount;
+  const enabled =
+    inspectedAccount?.enabled ?? resolveChannelAccountEnabled({ plugin, account, cfg });
+  const configured =
+    inspectedAccount?.configured ??
+    (await resolveChannelAccountConfigured({
+      plugin,
+      account,
+      cfg,
+      readAccountConfiguredField: true,
+    }));
+  const snapshot = buildChannelAccountSnapshot({
+    plugin,
+    cfg,
+    accountId,
+    account,
+    enabled,
+    configured,
+  });
+  return { accountId, account, enabled, configured, snapshot };
+}
+
 const formatAccountLabel = (params: { accountId: string; name?: string }) => {
   const base = params.accountId || "default";
   if (params.name?.trim()) {
@@ -109,6 +175,9 @@ const buildAccountNotes = (params: {
   }
   if (snapshot.appTokenSource && snapshot.appTokenSource !== "none") {
     notes.push(`app:${snapshot.appTokenSource}`);
+  }
+  if (hasConfiguredUnavailableCredentialStatus(entry.account)) {
+    notes.push("secret unavailable in this command path");
   }
   if (snapshot.baseUrl) {
     notes.push(snapshot.baseUrl);
@@ -198,6 +267,7 @@ function summarizeTokenConfig(params: {
   }
 
   if (hasBotTokenField && hasAppTokenField) {
+    const unavailable = enabled.filter((a) => hasConfiguredUnavailableCredentialStatus(a.account));
     const ready = enabled.filter((a) => {
       const rec = asRecord(a.account);
       const bot = typeof rec.botToken === "string" ? rec.botToken.trim() : "";
@@ -217,6 +287,13 @@ function summarizeTokenConfig(params: {
       return {
         state: "warn",
         detail: `partial tokens (need bot+app) · accounts ${partial.length}`,
+      };
+    }
+
+    if (unavailable.length > 0) {
+      return {
+        state: "warn",
+        detail: `configured tokens unavailable in this command path · accounts ${unavailable.length}`,
       };
     }
 
@@ -245,11 +322,19 @@ function summarizeTokenConfig(params: {
   }
 
   if (hasBotTokenField) {
+    const unavailable = enabled.filter((a) => hasConfiguredUnavailableCredentialStatus(a.account));
     const ready = enabled.filter((a) => {
       const rec = asRecord(a.account);
       const bot = typeof rec.botToken === "string" ? rec.botToken.trim() : "";
       return Boolean(bot);
     });
+
+    if (unavailable.length > 0) {
+      return {
+        state: "warn",
+        detail: `configured bot token unavailable in this command path · accounts ${unavailable.length}`,
+      };
+    }
 
     if (ready.length === 0) {
       return { state: "setup", detail: "no bot token" };
@@ -268,10 +353,17 @@ function summarizeTokenConfig(params: {
     };
   }
 
+  const unavailable = enabled.filter((a) => hasConfiguredUnavailableCredentialStatus(a.account));
   const ready = enabled.filter((a) => {
     const rec = asRecord(a.account);
     return typeof rec.token === "string" ? Boolean(rec.token.trim()) : false;
   });
+  if (unavailable.length > 0) {
+    return {
+      state: "warn",
+      detail: `configured token unavailable in this command path · accounts ${unavailable.length}`,
+    };
+  }
   if (ready.length === 0) {
     return { state: "setup", detail: "no token" };
   }
@@ -292,7 +384,7 @@ function summarizeTokenConfig(params: {
 // Keep this generic: channel-specific rules belong in the channel plugin.
 export async function buildChannelsTable(
   cfg: OpenClawConfig,
-  opts?: { showSecrets?: boolean },
+  opts?: { showSecrets?: boolean; sourceConfig?: OpenClawConfig },
 ): Promise<{
   rows: ChannelRow[];
   details: Array<{
@@ -319,29 +411,24 @@ export async function buildChannelsTable(
     const resolvedAccountIds = accountIds.length > 0 ? accountIds : [defaultAccountId];
 
     const accounts: ChannelAccountRow[] = [];
+    const sourceConfig = opts?.sourceConfig ?? cfg;
     for (const accountId of resolvedAccountIds) {
-      const account = plugin.config.resolveAccount(cfg, accountId);
-      const enabled = resolveChannelAccountEnabled({ plugin, account, cfg });
-      const configured = await resolveChannelAccountConfigured({
-        plugin,
-        account,
-        cfg,
-        readAccountConfiguredField: true,
-      });
-      const snapshot = buildChannelAccountSnapshot({
-        plugin,
-        cfg,
-        accountId,
-        account,
-        enabled,
-        configured,
-      });
-      accounts.push({ accountId, account, enabled, configured, snapshot });
+      accounts.push(
+        await resolveChannelAccountRow({
+          plugin,
+          cfg,
+          sourceConfig,
+          accountId,
+        }),
+      );
     }
 
     const anyEnabled = accounts.some((a) => a.enabled);
     const enabledAccounts = accounts.filter((a) => a.enabled);
     const configuredAccounts = enabledAccounts.filter((a) => a.configured);
+    const unavailableConfiguredAccounts = enabledAccounts.filter((a) =>
+      hasConfiguredUnavailableCredentialStatus(a.account),
+    );
     const defaultEntry = accounts.find((a) => a.accountId === defaultAccountId) ?? accounts[0];
 
     const summary = plugin.status?.buildChannelSummary
@@ -377,6 +464,9 @@ export async function buildChannelsTable(
         return "warn";
       }
       if (issues.length > 0) {
+        return "warn";
+      }
+      if (unavailableConfiguredAccounts.length > 0) {
         return "warn";
       }
       if (link.linked === false) {
@@ -423,6 +513,13 @@ export async function buildChannelsTable(
         return extra.length > 0 ? `${base} · ${extra.join(" · ")}` : base;
       }
 
+      if (unavailableConfiguredAccounts.length > 0) {
+        if (tokenSummary.detail?.includes("unavailable")) {
+          return tokenSummary.detail;
+        }
+        return `configured credentials unavailable in this command path · accounts ${unavailableConfiguredAccounts.length}`;
+      }
+
       if (tokenSummary.detail) {
         return tokenSummary.detail;
       }
@@ -461,7 +558,10 @@ export async function buildChannelsTable(
               accountId: entry.accountId,
               name: entry.snapshot.name,
             }),
-            Status: entry.enabled ? "OK" : "WARN",
+            Status:
+              entry.enabled && !hasConfiguredUnavailableCredentialStatus(entry.account)
+                ? "OK"
+                : "WARN",
             Notes: notes.join(" · "),
           };
         }),

@@ -7,6 +7,7 @@ import {
   formatPairingApproveHint,
   getChatChannelMeta,
   handleSlackMessageAction,
+  inspectSlackAccount,
   listSlackMessageActions,
   listSlackAccountIds,
   listSlackDirectoryGroupsFromConfig,
@@ -16,6 +17,8 @@ import {
   normalizeAccountId,
   normalizeSlackMessagingTarget,
   PAIRING_APPROVED_MESSAGE,
+  projectCredentialSnapshotFields,
+  resolveConfiguredFromCredentialStatuses,
   resolveDefaultSlackAccountId,
   resolveSlackAccount,
   resolveSlackReplyToMode,
@@ -131,6 +134,7 @@ export const slackPlugin: ChannelPlugin<ResolvedSlackAccount> = {
   config: {
     listAccountIds: (cfg) => listSlackAccountIds(cfg),
     resolveAccount: (cfg, accountId) => resolveSlackAccount({ cfg, accountId }),
+    inspectAccount: (cfg, accountId) => inspectSlackAccount({ cfg, accountId }),
     defaultAccountId: (cfg) => resolveDefaultSlackAccountId(cfg),
     setAccountEnabled: ({ cfg, accountId, enabled }) =>
       setAccountEnabledInConfigSection({
@@ -428,14 +432,14 @@ export const slackPlugin: ChannelPlugin<ResolvedSlackAccount> = {
       return await getSlackRuntime().channel.slack.probeSlack(token, timeoutMs);
     },
     buildAccountSnapshot: ({ account, runtime, probe }) => {
-      const configured = isSlackAccountConfigured(account);
+      const configured =
+        resolveConfiguredFromCredentialStatuses(account) ?? isSlackAccountConfigured(account);
       return {
         accountId: account.accountId,
         name: account.name,
         enabled: account.enabled,
         configured,
-        botTokenSource: account.botTokenSource,
-        appTokenSource: account.appTokenSource,
+        ...projectCredentialSnapshotFields(account),
         running: runtime?.running ?? false,
         lastStartAt: runtime?.lastStartAt ?? null,
         lastStopAt: runtime?.lastStopAt ?? null,

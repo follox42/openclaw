@@ -129,6 +129,10 @@ export type ChannelAccountSnapshot = {
   tokenSource?: string;
   botTokenSource?: string;
   appTokenSource?: string;
+  tokenStatus?: string;
+  botTokenStatus?: string;
+  appTokenStatus?: string;
+  userTokenStatus?: string;
   credentialSource?: string;
   secretSource?: string;
   audienceType?: string;

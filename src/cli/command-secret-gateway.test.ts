@@ -353,4 +353,155 @@ describe("resolveCommandSecretRefsViaGateway", () => {
     });
     expect(result.diagnostics).toEqual(["memory search ref inactive"]);
   });
+
+  it("degrades unresolved refs in summary mode instead of throwing", async () => {
+    const envKey = "TALK_API_KEY_SUMMARY_MISSING";
+    const priorValue = process.env[envKey];
+    delete process.env[envKey];
+    callGateway.mockResolvedValueOnce({
+      assignments: [],
+      diagnostics: [],
+    });
+
+    try {
+      const result = await resolveCommandSecretRefsViaGateway({
+        config: {
+          talk: {
+            apiKey: { source: "env", provider: "default", id: envKey },
+          },
+        } as OpenClawConfig,
+        commandName: "status",
+        targetIds: new Set(["talk.apiKey"]),
+        mode: "summary",
+      });
+
+      expect(result.resolvedConfig.talk?.apiKey).toBeUndefined();
+      expect(result.hadUnresolvedTargets).toBe(true);
+      expect(result.targetStatesByPath["talk.apiKey"]).toBe("unresolved");
+      expect(
+        result.diagnostics.some((entry) =>
+          entry.includes("talk.apiKey is unavailable in this command path"),
+        ),
+      ).toBe(true);
+    } finally {
+      if (priorValue === undefined) {
+        delete process.env[envKey];
+      } else {
+        process.env[envKey] = priorValue;
+      }
+    }
+  });
+
+  it("uses targeted local fallback after an incomplete gateway snapshot", async () => {
+    const envKey = "TALK_API_KEY_PARTIAL_GATEWAY";
+    const priorValue = process.env[envKey];
+    process.env[envKey] = "recovered-locally";
+    callGateway.mockResolvedValueOnce({
+      assignments: [],
+      diagnostics: [],
+    });
+
+    try {
+      const result = await resolveCommandSecretRefsViaGateway({
+        config: {
+          talk: {
+            apiKey: { source: "env", provider: "default", id: envKey },
+          },
+        } as OpenClawConfig,
+        commandName: "status",
+        targetIds: new Set(["talk.apiKey"]),
+        mode: "summary",
+      });
+
+      expect(result.resolvedConfig.talk?.apiKey).toBe("recovered-locally");
+      expect(result.hadUnresolvedTargets).toBe(false);
+      expect(result.targetStatesByPath["talk.apiKey"]).toBe("resolved_local");
+      expect(
+        result.diagnostics.some((entry) =>
+          entry.includes(
+            "resolved 1 secret path locally after the gateway snapshot was incomplete",
+          ),
+        ),
+      ).toBe(true);
+    } finally {
+      if (priorValue === undefined) {
+        delete process.env[envKey];
+      } else {
+        process.env[envKey] = priorValue;
+      }
+    }
+  });
+
+  it("limits local fallback to targeted refs in read-only modes", async () => {
+    const talkEnvKey = "TALK_API_KEY_TARGET_ONLY";
+    const gatewayEnvKey = "GATEWAY_PASSWORD_UNRELATED";
+    const priorTalkValue = process.env[talkEnvKey];
+    const priorGatewayValue = process.env[gatewayEnvKey];
+    process.env[talkEnvKey] = "target-only";
+    delete process.env[gatewayEnvKey];
+    callGateway.mockRejectedValueOnce(new Error("gateway closed"));
+
+    try {
+      const result = await resolveCommandSecretRefsViaGateway({
+        config: {
+          talk: {
+            apiKey: { source: "env", provider: "default", id: talkEnvKey },
+          },
+          gateway: {
+            auth: {
+              password: { source: "env", provider: "default", id: gatewayEnvKey },
+            },
+          },
+        } as OpenClawConfig,
+        commandName: "status",
+        targetIds: new Set(["talk.apiKey"]),
+        mode: "summary",
+      });
+
+      expect(result.resolvedConfig.talk?.apiKey).toBe("target-only");
+      expect(result.hadUnresolvedTargets).toBe(false);
+      expect(result.targetStatesByPath["talk.apiKey"]).toBe("resolved_local");
+    } finally {
+      if (priorTalkValue === undefined) {
+        delete process.env[talkEnvKey];
+      } else {
+        process.env[talkEnvKey] = priorTalkValue;
+      }
+      if (priorGatewayValue === undefined) {
+        delete process.env[gatewayEnvKey];
+      } else {
+        process.env[gatewayEnvKey] = priorGatewayValue;
+      }
+    }
+  });
+
+  it("degrades unresolved refs in operational read-only mode", async () => {
+    const envKey = "TALK_API_KEY_OPERATIONAL_MISSING";
+    const priorValue = process.env[envKey];
+    delete process.env[envKey];
+    callGateway.mockRejectedValueOnce(new Error("gateway closed"));
+
+    try {
+      const result = await resolveCommandSecretRefsViaGateway({
+        config: {
+          talk: {
+            apiKey: { source: "env", provider: "default", id: envKey },
+          },
+        } as OpenClawConfig,
+        commandName: "channels resolve",
+        targetIds: new Set(["talk.apiKey"]),
+        mode: "operational_readonly",
+      });
+
+      expect(result.resolvedConfig.talk?.apiKey).toBeUndefined();
+      expect(result.hadUnresolvedTargets).toBe(true);
+      expect(result.targetStatesByPath["talk.apiKey"]).toBe("unresolved");
+    } finally {
+      if (priorValue === undefined) {
+        delete process.env[envKey];
+      } else {
+        process.env[envKey] = priorValue;
+      }
+    }
+  });
 });

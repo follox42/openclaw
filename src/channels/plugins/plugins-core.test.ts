@@ -409,6 +409,48 @@ describe("directory (config-backed)", () => {
     await expectDirectoryIds(listTelegramDirectoryGroupsFromConfig, cfg, ["-1001"]);
   });
 
+  it("keeps config-backed directories readable when channel tokens are unresolved SecretRefs", async () => {
+    const envSecret = {
+      source: "env",
+      provider: "default",
+      id: "MISSING_TEST_SECRET",
+    } as const;
+    const cfg = {
+      channels: {
+        slack: {
+          botToken: envSecret,
+          appToken: envSecret,
+          dm: { allowFrom: ["U123"] },
+          channels: { C111: {} },
+        },
+        discord: {
+          token: envSecret,
+          dm: { allowFrom: ["<@111>"] },
+          guilds: {
+            "123": {
+              channels: {
+                "555": {},
+              },
+            },
+          },
+        },
+        telegram: {
+          botToken: envSecret,
+          allowFrom: ["alice"],
+          groups: { "-1001": {} },
+        },
+      },
+      // oxlint-disable-next-line typescript/no-explicit-any
+    } as any;
+
+    await expectDirectoryIds(listSlackDirectoryPeersFromConfig, cfg, ["user:u123"]);
+    await expectDirectoryIds(listSlackDirectoryGroupsFromConfig, cfg, ["channel:c111"]);
+    await expectDirectoryIds(listDiscordDirectoryPeersFromConfig, cfg, ["user:111"]);
+    await expectDirectoryIds(listDiscordDirectoryGroupsFromConfig, cfg, ["channel:555"]);
+    await expectDirectoryIds(listTelegramDirectoryPeersFromConfig, cfg, ["@alice"]);
+    await expectDirectoryIds(listTelegramDirectoryGroupsFromConfig, cfg, ["-1001"]);
+  });
+
   it("lists WhatsApp peers/groups from config", async () => {
     const cfg = {
       channels: {

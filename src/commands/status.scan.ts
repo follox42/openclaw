@@ -125,6 +125,7 @@ async function resolveChannelsStatus(params: {
 
 export type StatusScanResult = {
   cfg: ReturnType<typeof loadConfig>;
+  secretDiagnostics: string[];
   osSummary: ReturnType<typeof resolveOsSummary>;
   tailscaleMode: string;
   tailscaleDns: string | null;
@@ -179,11 +180,13 @@ async function scanStatusJsonFast(opts: {
   all?: boolean;
 }): Promise<StatusScanResult> {
   const loadedRaw = loadConfig();
-  const { resolvedConfig: cfg } = await resolveCommandSecretRefsViaGateway({
-    config: loadedRaw,
-    commandName: "status --json",
-    targetIds: getStatusCommandSecretTargetIds(),
-  });
+  const { resolvedConfig: cfg, diagnostics: secretDiagnostics } =
+    await resolveCommandSecretRefsViaGateway({
+      config: loadedRaw,
+      commandName: "status --json",
+      targetIds: getStatusCommandSecretTargetIds(),
+      mode: "summary",
+    });
   const osSummary = resolveOsSummary();
   const tailscaleMode = cfg.gateway?.tailscale?.mode ?? "off";
   const updateTimeoutMs = opts.all ? 6500 : 2500;
@@ -236,6 +239,7 @@ async function scanStatusJsonFast(opts: {
 
   return {
     cfg,
+    secretDiagnostics,
     osSummary,
     tailscaleMode,
     tailscaleDns,
@@ -278,11 +282,13 @@ export async function scanStatus(
     async (progress) => {
       progress.setLabel("Loading config…");
       const loadedRaw = loadConfig();
-      const { resolvedConfig: cfg } = await resolveCommandSecretRefsViaGateway({
-        config: loadedRaw,
-        commandName: "status",
-        targetIds: getStatusCommandSecretTargetIds(),
-      });
+      const { resolvedConfig: cfg, diagnostics: secretDiagnostics } =
+        await resolveCommandSecretRefsViaGateway({
+          config: loadedRaw,
+          commandName: "status",
+          targetIds: getStatusCommandSecretTargetIds(),
+          mode: "summary",
+        });
       const osSummary = resolveOsSummary();
       const tailscaleMode = cfg.gateway?.tailscale?.mode ?? "off";
       const tailscaleDnsPromise =
@@ -361,6 +367,7 @@ export async function scanStatus(
 
       return {
         cfg,
+        secretDiagnostics,
         osSummary,
         tailscaleMode,
         tailscaleDns,
