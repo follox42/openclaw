@@ -1,10 +1,12 @@
 import crypto from "node:crypto";
+import { promises as fs } from "node:fs";
 import { formatThinkingLevels, normalizeThinkLevel } from "../auto-reply/thinking.js";
 import { DEFAULT_SUBAGENT_MAX_SPAWN_DEPTH } from "../config/agent-limits.js";
 import { loadConfig } from "../config/config.js";
 import { callGateway } from "../gateway/call.js";
 import { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
 import {
+  isValidAgentId,
   isCronSessionKey,
   normalizeAgentId,
   parseAgentSessionKey,
@@ -13,11 +15,20 @@ import { normalizeDeliveryContext } from "../utils/delivery-context.js";
 import { resolveAgentConfig } from "./agent-scope.js";
 import { AGENT_LANE_SUBAGENT } from "./lanes.js";
 import { resolveSubagentSpawnModelSelection } from "./model-selection.js";
+import { resolveSandboxRuntimeStatus } from "./sandbox/runtime-status.js";
+import {
+  mapToolContextToSpawnedRunMetadata,
+  normalizeSpawnedRunMetadata,
+  resolveSpawnedWorkspaceInheritance,
+} from "./spawned-context.js";
 import { buildSubagentSystemPrompt } from "./subagent-announce.js";
+import {
+  decodeStrictBase64,
+  materializeSubagentAttachments,
+  type SubagentAttachmentReceiptFile,
+} from "./subagent-attachments.js";
 import { getSubagentDepthFromSessionStore } from "./subagent-depth.js";
 import { countActiveRunsForSession, registerSubagentRun } from "./subagent-registry.js";
-import { createSwarm, addMember, getSwarm, buildSwarmContextPrompt } from "./swarm/topology.js";
-import type { SwarmTopology, ConsensusAlgorithm } from "./swarm/types.js";
 import { readStringParam } from "./tools/common.js";
 import {
   resolveDisplaySessionKey,
@@ -27,6 +38,10 @@ import {
 
 export const SUBAGENT_SPAWN_MODES = ["run", "session"] as const;
 export type SpawnSubagentMode = (typeof SUBAGENT_SPAWN_MODES)[number];
+export const SUBAGENT_SPAWN_SANDBOX_MODES = ["inherit", "require"] as const;
+export type SpawnSubagentSandboxMode = (typeof SUBAGENT_SPAWN_SANDBOX_MODES)[number];
+
+export { decodeStrictBase64 };
 
 export type SpawnSubagentParams = {
   task: string;
@@ -38,18 +53,15 @@ export type SpawnSubagentParams = {
   thread?: boolean;
   mode?: SpawnSubagentMode;
   cleanup?: "delete" | "keep";
+  sandbox?: SpawnSubagentSandboxMode;
   expectsCompletionMessage?: boolean;
-  /** Swarm options — enables multi-agent coordination beyond hub-spoke */
-  swarm?: {
-    /** Join an existing swarm (creates new if not found) */
-    swarmId?: string;
-    /** Topology: star (default), mesh, hierarchical, ring */
-    topology?: SwarmTopology;
-    /** Consensus algorithm: none (default), raft, bft, gossip, vote */
-    consensus?: ConsensusAlgorithm;
-    /** Role for this agent in the swarm */
-    role?: string;
-  };
+  attachments?: Array<{
+    name: string;
+    content: string;
+    encoding?: "utf8" | "base64";
+    mimeType?: string;
+  }>;
+  attachMountPath?: string;
 };
 
 export type SpawnSubagentContext = {
@@ -62,10 +74,12 @@ export type SpawnSubagentContext = {
   agentGroupChannel?: string | null;
   agentGroupSpace?: string | null;
   requesterAgentIdOverride?: string;
+  /** Explicit workspace directory for subagent to inherit (optional). */
+  workspaceDir?: string;
 };
 
 export const SUBAGENT_SPAWN_ACCEPTED_NOTE =
-  "auto-announces on completion, do not poll/sleep. The response will be sent back as an user message.";
+  "Auto-announce is push-based. After spawning children, do NOT call sessions_list, sessions_history, exec sleep, or any polling tool. Wait for completion events to arrive as user messages, track expected child session keys, and only send your final answer after ALL expected completions arrive. If a child completion event arrives AFTER your final answer, reply ONLY with NO_REPLY.";
 export const SUBAGENT_SPAWN_SESSION_ACCEPTED_NOTE =
   "thread-bound session stays active after this task; continue in-thread for follow-ups.";
 
@@ -77,6 +91,12 @@ export type SpawnSubagentResult = {
   note?: string;
   modelApplied?: boolean;
   error?: string;
+  attachments?: {
+    count: number;
+    totalBytes: number;
+    files: Array<{ name: string; bytes: number; sha256: string }>;
+    relDir: string;
+  };
 };
 
 export function splitModelRef(ref?: string) {
@@ -92,6 +112,44 @@ export function splitModelRef(ref?: string) {
     return { provider, model };
   }
   return { provider: undefined, model: trimmed };
+}
+
+function sanitizeMountPathHint(value?: string): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  // Prevent prompt injection via control/newline characters in system prompt hints.
+  // eslint-disable-next-line no-control-regex
+  if (/[\r\n\u0000-\u001F\u007F\u0085\u2028\u2029]/.test(trimmed)) {
+    return undefined;
+  }
+  if (!/^[A-Za-z0-9._\-/:]+$/.test(trimmed)) {
+    return undefined;
+  }
+  return trimmed;
+}
+
+async function cleanupProvisionalSession(
+  childSessionKey: string,
+  options?: {
+    emitLifecycleHooks?: boolean;
+    deleteTranscript?: boolean;
+  },
+): Promise<void> {
+  try {
+    await callGateway({
+      method: "sessions.delete",
+      params: {
+        key: childSessionKey,
+        emitLifecycleHooks: options?.emitLifecycleHooks === true,
+        deleteTranscript: options?.deleteTranscript === true,
+      },
+      timeoutMs: 10_000,
+    });
+  } catch {
+    // Best-effort cleanup only.
+  }
 }
 
 function resolveSpawnMode(params: {
@@ -182,10 +240,22 @@ export async function spawnSubagentDirect(
 ): Promise<SpawnSubagentResult> {
   const task = params.task;
   const label = params.label?.trim() || "";
-  const requestedAgentId = params.agentId;
+  const requestedAgentId = params.agentId?.trim();
+
+  // Reject malformed agentId before normalizeAgentId can mangle it.
+  // Without this gate, error-message strings like "Agent not found: xyz" pass
+  // through normalizeAgentId and become "agent-not-found--xyz", which later
+  // creates ghost workspace directories and triggers cascading cron loops (#31311).
+  if (requestedAgentId && !isValidAgentId(requestedAgentId)) {
+    return {
+      status: "error",
+      error: `Invalid agentId "${requestedAgentId}". Agent IDs must match [a-z0-9][a-z0-9_-]{0,63}. Use agents_list to discover valid targets.`,
+    };
+  }
   const modelOverride = params.model;
   const thinkingOverrideRaw = params.thinking;
   const requestThreadBinding = params.thread === true;
+  const sandboxMode = params.sandbox === "require" ? "require" : "inherit";
   const spawnMode = resolveSpawnMode({
     requestedMode: params.mode,
     threadRequested: requestThreadBinding,
@@ -282,6 +352,28 @@ export async function spawnSubagentDirect(
     }
   }
   const childSessionKey = `agent:${targetAgentId}:subagent:${crypto.randomUUID()}`;
+  const requesterRuntime = resolveSandboxRuntimeStatus({
+    cfg,
+    sessionKey: requesterInternalKey,
+  });
+  const childRuntime = resolveSandboxRuntimeStatus({
+    cfg,
+    sessionKey: childSessionKey,
+  });
+  if (!childRuntime.sandboxed && (requesterRuntime.sandboxed || sandboxMode === "require")) {
+    if (requesterRuntime.sandboxed) {
+      return {
+        status: "forbidden",
+        error:
+          "Sandboxed sessions cannot spawn unsandboxed subagents. Set a sandboxed target agent or use the same agent runtime.",
+      };
+    }
+    return {
+      status: "forbidden",
+      error:
+        'sessions_spawn sandbox="require" needs a sandboxed target runtime. Pick a sandboxed agentId or use sandbox="inherit".',
+    };
+  }
   const childDepth = callerDepth + 1;
   const spawnedByKey = requesterInternalKey;
   const targetAgentConfig = resolveAgentConfig(cfg, targetAgentId);
@@ -309,56 +401,47 @@ export async function spawnSubagentDirect(
     }
     thinkingOverride = normalized;
   }
-  try {
-    await callGateway({
-      method: "sessions.patch",
-      params: { key: childSessionKey, spawnDepth: childDepth },
-      timeoutMs: 10_000,
-    });
-  } catch (err) {
-    const messageText =
-      err instanceof Error ? err.message : typeof err === "string" ? err : "error";
+  const patchChildSession = async (patch: Record<string, unknown>): Promise<string | undefined> => {
+    try {
+      await callGateway({
+        method: "sessions.patch",
+        params: { key: childSessionKey, ...patch },
+        timeoutMs: 10_000,
+      });
+      return undefined;
+    } catch (err) {
+      return err instanceof Error ? err.message : typeof err === "string" ? err : "error";
+    }
+  };
+
+  const spawnDepthPatchError = await patchChildSession({ spawnDepth: childDepth });
+  if (spawnDepthPatchError) {
     return {
       status: "error",
-      error: messageText,
+      error: spawnDepthPatchError,
       childSessionKey,
     };
   }
 
   if (resolvedModel) {
-    try {
-      await callGateway({
-        method: "sessions.patch",
-        params: { key: childSessionKey, model: resolvedModel },
-        timeoutMs: 10_000,
-      });
-      modelApplied = true;
-    } catch (err) {
-      const messageText =
-        err instanceof Error ? err.message : typeof err === "string" ? err : "error";
+    const modelPatchError = await patchChildSession({ model: resolvedModel });
+    if (modelPatchError) {
       return {
         status: "error",
-        error: messageText,
+        error: modelPatchError,
         childSessionKey,
       };
     }
+    modelApplied = true;
   }
   if (thinkingOverride !== undefined) {
-    try {
-      await callGateway({
-        method: "sessions.patch",
-        params: {
-          key: childSessionKey,
-          thinkingLevel: thinkingOverride === "off" ? null : thinkingOverride,
-        },
-        timeoutMs: 10_000,
-      });
-    } catch (err) {
-      const messageText =
-        err instanceof Error ? err.message : typeof err === "string" ? err : "error";
+    const thinkingPatchError = await patchChildSession({
+      thinkingLevel: thinkingOverride === "off" ? null : thinkingOverride,
+    });
+    if (thinkingPatchError) {
       return {
         status: "error",
-        error: messageText,
+        error: thinkingPatchError,
         childSessionKey,
       };
     }
@@ -396,63 +479,52 @@ export async function spawnSubagentDirect(
     }
     threadBindingReady = true;
   }
-  const childSystemPrompt = buildSubagentSystemPrompt({
+  const mountPathHint = sanitizeMountPathHint(params.attachMountPath);
+
+  let childSystemPrompt = buildSubagentSystemPrompt({
     requesterSessionKey,
     requesterOrigin,
     childSessionKey,
     label: label || undefined,
     task,
-    acpEnabled: cfg.acp?.enabled !== false,
+    acpEnabled: cfg.acp?.enabled !== false && !childRuntime.sandboxed,
     childDepth,
     maxSpawnDepth,
   });
-  // ─── Swarm Integration ────────────────────────────────────────────────────
-  // If swarm options provided, register this agent in the swarm and compute peers.
-  let swarmContextPrompt: string | undefined;
-  if (params.swarm) {
-    try {
-      const swarmOpts = params.swarm;
-      let targetSwarmId = swarmOpts.swarmId;
 
-      // Create swarm if no ID provided, or get existing
-      if (!targetSwarmId) {
-        const newSwarm = createSwarm({
-          topology: swarmOpts.topology ?? "star",
-          consensus: swarmOpts.consensus ?? "none",
-        });
-        targetSwarmId = newSwarm.swarmId;
-      } else {
-        // Create if not found
-        const existing = getSwarm(targetSwarmId);
-        if (!existing) {
-          createSwarm({
-            topology: swarmOpts.topology ?? "star",
-            consensus: swarmOpts.consensus ?? "none",
-          });
-        }
+  let retainOnSessionKeep = false;
+  let attachmentsReceipt:
+    | {
+        count: number;
+        totalBytes: number;
+        files: SubagentAttachmentReceiptFile[];
+        relDir: string;
       }
-
-      // Add this child to the swarm
-      const swarmState = addMember(targetSwarmId, {
-        sessionKey: childSessionKey,
-        agentId: targetAgentId,
-        role: swarmOpts.role,
-      });
-
-      if (swarmState) {
-        const peers = swarmState.members.find((m) => m.sessionKey === childSessionKey)?.peers ?? [];
-        swarmContextPrompt = buildSwarmContextPrompt({
-          swarmId: targetSwarmId,
-          topology: swarmState.topology,
-          sessionKey: childSessionKey,
-          peers,
-          role: swarmOpts.role,
-          consensus: swarmState.consensus,
-        });
-      }
-    } catch {
-      // Swarm errors are non-fatal — don't block spawn
-    }
+    | undefined;
+  let attachmentAbsDir: string | undefined;
+  let attachmentRootDir: string | undefined;
+  const materializedAttachments = await materializeSubagentAttachments({
+    config: cfg,
+    targetAgentId,
+    attachments: params.attachments,
+    mountPathHint,
+  });
+  if (materializedAttachments && materializedAttachments.status !== "ok") {
+    await cleanupProvisionalSession(childSessionKey, {
+      emitLifecycleHooks: threadBindingReady,
+      deleteTranscript: true,
+    });
+    return {
+      status: materializedAttachments.status,
+      error: materializedAttachments.error,
+    };
+  }
+  if (materializedAttachments?.status === "ok") {
+    retainOnSessionKeep = materializedAttachments.retainOnSessionKeep;
+    attachmentsReceipt = materializedAttachments.receipt;
+    attachmentAbsDir = materializedAttachments.absDir;
+    attachmentRootDir = materializedAttachments.rootDir;
+    childSystemPrompt = `${childSystemPrompt}\n\n${materializedAttachments.systemPromptSuffix}`;
   }
 
   const childTaskMessage = [
@@ -460,11 +532,26 @@ export async function spawnSubagentDirect(
     spawnMode === "session"
       ? "[Subagent Context] This subagent session is persistent and remains available for thread follow-up messages."
       : undefined,
-    swarmContextPrompt,
     `[Subagent Task]: ${task}`,
   ]
     .filter((line): line is string => Boolean(line))
     .join("\n\n");
+
+  const toolSpawnMetadata = mapToolContextToSpawnedRunMetadata({
+    agentGroupId: ctx.agentGroupId,
+    agentGroupChannel: ctx.agentGroupChannel,
+    agentGroupSpace: ctx.agentGroupSpace,
+    workspaceDir: ctx.workspaceDir,
+  });
+  const spawnedMetadata = normalizeSpawnedRunMetadata({
+    spawnedBy: spawnedByKey,
+    ...toolSpawnMetadata,
+    workspaceDir: resolveSpawnedWorkspaceInheritance({
+      config: cfg,
+      requesterSessionKey: requesterInternalKey,
+      explicitWorkspaceDir: toolSpawnMetadata.workspaceDir,
+    }),
+  });
 
   const childIdem = crypto.randomUUID();
   let childRunId: string = childIdem;
@@ -485,10 +572,7 @@ export async function spawnSubagentDirect(
         thinking: thinkingOverride,
         timeout: runTimeoutSeconds,
         label: label || undefined,
-        spawnedBy: spawnedByKey,
-        groupId: ctx.agentGroupId ?? undefined,
-        groupChannel: ctx.agentGroupChannel ?? undefined,
-        groupSpace: ctx.agentGroupSpace ?? undefined,
+        ...spawnedMetadata,
       },
       timeoutMs: 10_000,
     });
@@ -496,6 +580,13 @@ export async function spawnSubagentDirect(
       childRunId = response.runId;
     }
   } catch (err) {
+    if (attachmentAbsDir) {
+      try {
+        await fs.rm(attachmentAbsDir, { recursive: true, force: true });
+      } catch {
+        // Best-effort cleanup only.
+      }
+    }
     if (threadBindingReady) {
       const hasEndedHook = hookRunner?.hasHooks("subagent_ended") === true;
       let endedHookEmitted = false;
@@ -548,20 +639,48 @@ export async function spawnSubagentDirect(
     };
   }
 
-  registerSubagentRun({
-    runId: childRunId,
-    childSessionKey,
-    requesterSessionKey: requesterInternalKey,
-    requesterOrigin,
-    requesterDisplayKey,
-    task,
-    cleanup,
-    label: label || undefined,
-    model: resolvedModel,
-    runTimeoutSeconds,
-    expectsCompletionMessage,
-    spawnMode,
-  });
+  try {
+    registerSubagentRun({
+      runId: childRunId,
+      childSessionKey,
+      requesterSessionKey: requesterInternalKey,
+      requesterOrigin,
+      requesterDisplayKey,
+      task,
+      cleanup,
+      label: label || undefined,
+      model: resolvedModel,
+      runTimeoutSeconds,
+      expectsCompletionMessage,
+      spawnMode,
+      attachmentsDir: attachmentAbsDir,
+      attachmentsRootDir: attachmentRootDir,
+      retainAttachmentsOnKeep: retainOnSessionKeep,
+    });
+  } catch (err) {
+    if (attachmentAbsDir) {
+      try {
+        await fs.rm(attachmentAbsDir, { recursive: true, force: true });
+      } catch {
+        // Best-effort cleanup only.
+      }
+    }
+    try {
+      await callGateway({
+        method: "sessions.delete",
+        params: { key: childSessionKey, deleteTranscript: true, emitLifecycleHooks: false },
+        timeoutMs: 10_000,
+      });
+    } catch {
+      // Best-effort cleanup only.
+    }
+    return {
+      status: "error",
+      error: `Failed to register subagent run: ${summarizeError(err)}`,
+      childSessionKey,
+      runId: childRunId,
+    };
+  }
 
   if (hookRunner?.hasHooks("subagent_spawned")) {
     try {
@@ -609,5 +728,6 @@ export async function spawnSubagentDirect(
     mode: spawnMode,
     note,
     modelApplied: resolvedModel ? modelApplied : undefined,
+    attachments: attachmentsReceipt,
   };
 }

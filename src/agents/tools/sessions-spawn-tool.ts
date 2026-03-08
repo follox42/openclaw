@@ -1,13 +1,24 @@
 import { Type } from "@sinclair/typebox";
 import type { GatewayMessageChannel } from "../../utils/message-channel.js";
-import { ACP_SPAWN_MODES, spawnAcpDirect } from "../acp-spawn.js";
+import { ACP_SPAWN_MODES, ACP_SPAWN_STREAM_TARGETS, spawnAcpDirect } from "../acp-spawn.js";
 import { optionalStringEnum } from "../schema/typebox.js";
+import type { SpawnedToolContext } from "../spawned-context.js";
 import { SUBAGENT_SPAWN_MODES, spawnSubagentDirect } from "../subagent-spawn.js";
-import { SWARM_TOPOLOGIES, CONSENSUS_ALGORITHMS } from "../swarm/types.js";
 import type { AnyAgentTool } from "./common.js";
-import { jsonResult, readStringParam } from "./common.js";
+import { jsonResult, readStringParam, ToolInputError } from "./common.js";
 
 const SESSIONS_SPAWN_RUNTIMES = ["subagent", "acp"] as const;
+const SESSIONS_SPAWN_SANDBOX_MODES = ["inherit", "require"] as const;
+const UNSUPPORTED_SESSIONS_SPAWN_PARAM_KEYS = [
+  "target",
+  "transport",
+  "channel",
+  "to",
+  "threadId",
+  "thread_id",
+  "replyTo",
+  "reply_to",
+] as const;
 
 const SessionsSpawnToolSchema = Type.Object({
   task: Type.String(),
@@ -23,61 +34,59 @@ const SessionsSpawnToolSchema = Type.Object({
   thread: Type.Optional(Type.Boolean()),
   mode: optionalStringEnum(SUBAGENT_SPAWN_MODES),
   cleanup: optionalStringEnum(["delete", "keep"] as const),
-  // ─── Swarm Options ──────────────────────────────────────────────────────────
-  // Optional swarm integration. When provided, agents are registered in a swarm
-  // and receive peer information enabling direct agent↔agent communication.
-  topology: Type.Optional(
-    Type.Union(
-      SWARM_TOPOLOGIES.map((t) => Type.Literal(t)),
-      {
-        description:
-          "Swarm topology: star (default, backward-compat), mesh (P2P), hierarchical (leader+workers), ring (pipeline)",
-      },
+  sandbox: optionalStringEnum(SESSIONS_SPAWN_SANDBOX_MODES),
+  streamTo: optionalStringEnum(ACP_SPAWN_STREAM_TARGETS),
+
+  // Inline attachments (snapshot-by-value).
+  // NOTE: Attachment contents are redacted from transcript persistence by sanitizeToolCallInputs.
+  attachments: Type.Optional(
+    Type.Array(
+      Type.Object({
+        name: Type.String(),
+        content: Type.String(),
+        encoding: Type.Optional(optionalStringEnum(["utf8", "base64"] as const)),
+        mimeType: Type.Optional(Type.String()),
+      }),
+      { maxItems: 50 },
     ),
   ),
-  swarmId: Type.Optional(
-    Type.String({
-      description: "Join an existing swarm by ID. Creates new swarm if not found.",
+  attachAs: Type.Optional(
+    Type.Object({
+      // Where the spawned agent should look for attachments.
+      // Kept as a hint; implementation materializes into the child workspace.
+      mountPath: Type.Optional(Type.String()),
     }),
-  ),
-  swarmRole: Type.Optional(
-    Type.String({
-      description: "Role for this agent in the swarm (e.g. researcher, coder, analyst)",
-    }),
-  ),
-  consensus: Type.Optional(
-    Type.Union(
-      CONSENSUS_ALGORITHMS.map((c) => Type.Literal(c)),
-      {
-        description:
-          "Consensus algorithm: none (default), raft (leader election), bft (Byzantine fault-tolerant), gossip, vote",
-      },
-    ),
   ),
 });
 
-export function createSessionsSpawnTool(opts?: {
-  agentSessionKey?: string;
-  agentChannel?: GatewayMessageChannel;
-  agentAccountId?: string;
-  agentTo?: string;
-  agentThreadId?: string | number;
-  agentGroupId?: string | null;
-  agentGroupChannel?: string | null;
-  agentGroupSpace?: string | null;
-  sandboxed?: boolean;
-  /** Explicit agent ID override for cron/hook sessions where session key parsing may not work. */
-  requesterAgentIdOverride?: string;
-}): AnyAgentTool {
+export function createSessionsSpawnTool(
+  opts?: {
+    agentSessionKey?: string;
+    agentChannel?: GatewayMessageChannel;
+    agentAccountId?: string;
+    agentTo?: string;
+    agentThreadId?: string | number;
+    sandboxed?: boolean;
+    /** Explicit agent ID override for cron/hook sessions where session key parsing may not work. */
+    requesterAgentIdOverride?: string;
+  } & SpawnedToolContext,
+): AnyAgentTool {
   return {
     label: "Sessions",
     name: "sessions_spawn",
     description:
-      'Spawn an isolated session (runtime="subagent" or runtime="acp"). mode="run" is one-shot and mode="session" is persistent/thread-bound. ' +
-      'Swarm support: set topology="mesh" or topology="hierarchical" with optional swarmId to enable direct agent↔agent communication.',
+      'Spawn an isolated session (runtime="subagent" or runtime="acp"). mode="run" is one-shot and mode="session" is persistent/thread-bound. Subagents inherit the parent workspace directory automatically.',
     parameters: SessionsSpawnToolSchema,
     execute: async (_toolCallId, args) => {
       const params = args as Record<string, unknown>;
+      const unsupportedParam = UNSUPPORTED_SESSIONS_SPAWN_PARAM_KEYS.find((key) =>
+        Object.hasOwn(params, key),
+      );
+      if (unsupportedParam) {
+        throw new ToolInputError(
+          `sessions_spawn does not support "${unsupportedParam}". Use "message" or "sessions_send" for channel delivery.`,
+        );
+      }
       const task = readStringParam(params, "task", { required: true });
       const label = typeof params.label === "string" ? params.label.trim() : "";
       const runtime = params.runtime === "acp" ? "acp" : "subagent";
@@ -88,6 +97,8 @@ export function createSessionsSpawnTool(opts?: {
       const mode = params.mode === "run" || params.mode === "session" ? params.mode : undefined;
       const cleanup =
         params.cleanup === "keep" || params.cleanup === "delete" ? params.cleanup : "keep";
+      const sandbox = params.sandbox === "require" ? "require" : "inherit";
+      const streamTo = params.streamTo === "parent" ? "parent" : undefined;
       // Back-compat: older callers used timeoutSeconds for this tool.
       const timeoutSecondsCandidate =
         typeof params.runTimeoutSeconds === "number"
@@ -100,72 +111,85 @@ export function createSessionsSpawnTool(opts?: {
           ? Math.max(0, Math.floor(timeoutSecondsCandidate))
           : undefined;
       const thread = params.thread === true;
-
-      // ─── Swarm Options ─────────────────────────────────────────────────────
-      const topologyRaw = readStringParam(params, "topology");
-      const topology = SWARM_TOPOLOGIES.includes(topologyRaw as (typeof SWARM_TOPOLOGIES)[number])
-        ? (topologyRaw as (typeof SWARM_TOPOLOGIES)[number])
-        : undefined;
-      const swarmId = readStringParam(params, "swarmId") ?? undefined;
-      const swarmRole = readStringParam(params, "swarmRole") ?? undefined;
-      const consensusRaw = readStringParam(params, "consensus");
-      const consensus = CONSENSUS_ALGORITHMS.includes(
-        consensusRaw as (typeof CONSENSUS_ALGORITHMS)[number],
-      )
-        ? (consensusRaw as (typeof CONSENSUS_ALGORITHMS)[number])
+      const attachments = Array.isArray(params.attachments)
+        ? (params.attachments as Array<{
+            name: string;
+            content: string;
+            encoding?: "utf8" | "base64";
+            mimeType?: string;
+          }>)
         : undefined;
 
-      // Build swarm options only if any swarm param is provided
-      const swarmOptions =
-        topology || swarmId || swarmRole || consensus
-          ? { topology, swarmId, role: swarmRole, consensus }
-          : undefined;
+      if (streamTo && runtime !== "acp") {
+        return jsonResult({
+          status: "error",
+          error: `streamTo is only supported for runtime=acp; got runtime=${runtime}`,
+        });
+      }
 
-      const result =
-        runtime === "acp"
-          ? await spawnAcpDirect(
-              {
-                task,
-                label: label || undefined,
-                agentId: requestedAgentId,
-                cwd,
-                mode: mode && ACP_SPAWN_MODES.includes(mode) ? mode : undefined,
-                thread,
-              },
-              {
-                agentSessionKey: opts?.agentSessionKey,
-                agentChannel: opts?.agentChannel,
-                agentAccountId: opts?.agentAccountId,
-                agentTo: opts?.agentTo,
-                agentThreadId: opts?.agentThreadId,
-              },
-            )
-          : await spawnSubagentDirect(
-              {
-                task,
-                label: label || undefined,
-                agentId: requestedAgentId,
-                model: modelOverride,
-                thinking: thinkingOverrideRaw,
-                runTimeoutSeconds,
-                thread,
-                mode,
-                cleanup,
-                expectsCompletionMessage: true,
-                swarm: swarmOptions,
-              },
-              {
-                agentSessionKey: opts?.agentSessionKey,
-                agentChannel: opts?.agentChannel,
-                agentAccountId: opts?.agentAccountId,
-                agentTo: opts?.agentTo,
-                agentThreadId: opts?.agentThreadId,
-                agentGroupId: opts?.agentGroupId,
-                agentGroupChannel: opts?.agentGroupChannel,
-                agentGroupSpace: opts?.agentGroupSpace,
-                requesterAgentIdOverride: opts?.requesterAgentIdOverride,
-              },
-            );
+      if (runtime === "acp") {
+        if (Array.isArray(attachments) && attachments.length > 0) {
+          return jsonResult({
+            status: "error",
+            error:
+              "attachments are currently unsupported for runtime=acp; use runtime=subagent or remove attachments",
+          });
+        }
+        const result = await spawnAcpDirect(
+          {
+            task,
+            label: label || undefined,
+            agentId: requestedAgentId,
+            cwd,
+            mode: mode && ACP_SPAWN_MODES.includes(mode) ? mode : undefined,
+            thread,
+            sandbox,
+            streamTo,
+          },
+          {
+            agentSessionKey: opts?.agentSessionKey,
+            agentChannel: opts?.agentChannel,
+            agentAccountId: opts?.agentAccountId,
+            agentTo: opts?.agentTo,
+            agentThreadId: opts?.agentThreadId,
+            sandboxed: opts?.sandboxed,
+          },
+        );
+        return jsonResult(result);
+      }
+
+      const result = await spawnSubagentDirect(
+        {
+          task,
+          label: label || undefined,
+          agentId: requestedAgentId,
+          model: modelOverride,
+          thinking: thinkingOverrideRaw,
+          runTimeoutSeconds,
+          thread,
+          mode,
+          cleanup,
+          sandbox,
+          expectsCompletionMessage: true,
+          attachments,
+          attachMountPath:
+            params.attachAs && typeof params.attachAs === "object"
+              ? readStringParam(params.attachAs as Record<string, unknown>, "mountPath")
+              : undefined,
+        },
+        {
+          agentSessionKey: opts?.agentSessionKey,
+          agentChannel: opts?.agentChannel,
+          agentAccountId: opts?.agentAccountId,
+          agentTo: opts?.agentTo,
+          agentThreadId: opts?.agentThreadId,
+          agentGroupId: opts?.agentGroupId,
+          agentGroupChannel: opts?.agentGroupChannel,
+          agentGroupSpace: opts?.agentGroupSpace,
+          requesterAgentIdOverride: opts?.requesterAgentIdOverride,
+          workspaceDir: opts?.workspaceDir,
+        },
+      );
 
       return jsonResult(result);
     },

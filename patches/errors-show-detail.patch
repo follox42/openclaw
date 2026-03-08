@@ -1,0 +1,15 @@
+diff --git a/src/agents/pi-embedded-helpers/errors.ts b/src/agents/pi-embedded-helpers/errors.ts
+index 80ba22198..ff8def04a 100644
+--- a/src/agents/pi-embedded-helpers/errors.ts
++++ b/src/agents/pi-embedded-helpers/errors.ts
+@@ -26,7 +26,9 @@ const OVERLOADED_ERROR_USER_MESSAGE =
+ 
+ function formatRateLimitOrOverloadedErrorCopy(raw: string): string | undefined {
+   if (isRateLimitErrorMessage(raw)) {
+-    return RATE_LIMIT_ERROR_USER_MESSAGE;
++    const info = parseApiErrorInfo(raw);
++    const detail = info?.message ?? raw;
++    return `${RATE_LIMIT_ERROR_USER_MESSAGE}\nDetail: ${detail}`;
+   }
+   if (isOverloadedErrorMessage(raw)) {
+     return OVERLOADED_ERROR_USER_MESSAGE;
