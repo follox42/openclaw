@@ -177,41 +177,42 @@ function buildAnthropicAuthDoctorHint(params: {
 }
 
 async function runAnthropicOAuth(ctx: ProviderAuthContext): Promise<ProviderAuthResult> {
-  const isRemote = !process.stdout.isTTY || Boolean(process.env.SSH_CONNECTION);
+  const { isRemote, openUrl } = ctx;
+  const manualInputPromptMessage = "Paste the authorization code (or full redirect URL):";
 
   await ctx.prompter.note(
-    [
-      isRemote
-        ? "You are running in a remote/VPS environment."
-        : "A browser window will open for Anthropic authentication.",
-      "After signing in, the callback will complete automatically.",
-      "If it doesn't, paste the authorization code or redirect URL when prompted.",
-      "Anthropic OAuth uses localhost:53692 for the callback.",
-    ].join("\n"),
+    isRemote
+      ? [
+          "You are running in a remote/VPS environment.",
+          "A URL will be shown for you to open in your LOCAL browser.",
+          "After signing in, paste the authorization code or redirect URL.",
+        ].join("\n")
+      : [
+          "Browser will open for Anthropic authentication.",
+          "If the callback doesn't auto-complete, paste the authorization code.",
+          "Anthropic OAuth uses localhost:53692 for the callback.",
+        ].join("\n"),
     "Anthropic OAuth",
   );
 
   const spin = ctx.prompter.progress("Starting OAuth flow…");
   try {
-    const onAuth = async ({ url }: { url: string }) => {
-      spin.stop("OAuth URL ready");
-      ctx.runtime.log(`\nOpen this URL in your browser:\n\n${url}\n`);
-    };
-    const onPrompt = async (prompt: { message: string }) => {
-      return String(
-        (await ctx.prompter.text({
-          message: prompt.message,
-          validate: (v) => (String(v ?? "").trim().length > 0 ? undefined : "Required"),
-        })) ?? "",
-      );
-    };
+    const { onAuth, onPrompt } = ctx.oauth.createVpsAwareHandlers({
+      isRemote,
+      prompter: ctx.prompter,
+      runtime: ctx.runtime,
+      spin,
+      openUrl,
+      localBrowserMessage: "Complete sign-in in browser…",
+      manualPromptMessage: manualInputPromptMessage,
+    });
 
     const creds: OAuthCredentials | null = await loginAnthropic({
       onAuth,
       onPrompt,
       onManualCodeInput: async () =>
         await onPrompt({
-          message: "Paste the authorization code or full redirect URL:",
+          message: manualInputPromptMessage,
         }),
       onProgress: (msg: string) => spin.update(msg),
     });
