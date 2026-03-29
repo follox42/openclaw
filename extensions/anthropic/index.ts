@@ -178,35 +178,24 @@ function buildAnthropicAuthDoctorHint(params: {
 
 async function runAnthropicOAuth(ctx: ProviderAuthContext): Promise<ProviderAuthResult> {
   const isRemote = !process.stdout.isTTY || Boolean(process.env.SSH_CONNECTION);
-  const openUrl = async (url: string) => {
-    ctx.runtime.log(`Open this URL in your browser:\n\n${url}\n`);
-  };
 
   await ctx.prompter.note(
-    isRemote
-      ? [
-          "You are running in a remote/VPS environment.",
-          "A URL will be shown for you to open in your LOCAL browser.",
-          "After signing in, paste the redirect URL back here.",
-        ].join("\n")
-      : [
-          "Browser will open for Anthropic authentication.",
-          "If the callback doesn't auto-complete, paste the redirect URL.",
-          "Anthropic OAuth uses localhost:53692 for the callback.",
-        ].join("\n"),
+    [
+      isRemote
+        ? "You are running in a remote/VPS environment."
+        : "A browser window will open for Anthropic authentication.",
+      "After signing in, the callback will complete automatically.",
+      "If it doesn't, paste the authorization code or redirect URL when prompted.",
+      "Anthropic OAuth uses localhost:53692 for the callback.",
+    ].join("\n"),
     "Anthropic OAuth",
   );
 
   const spin = ctx.prompter.progress("Starting OAuth flow…");
   try {
     const onAuth = async ({ url }: { url: string }) => {
-      if (isRemote) {
-        spin.stop("OAuth URL ready");
-        ctx.runtime.log(`\nOpen this URL in your LOCAL browser:\n\n${url}\n`);
-        return;
-      }
-      spin.update("Complete sign-in in browser…");
-      await openUrl(url);
+      spin.stop("OAuth URL ready");
+      ctx.runtime.log(`\nOpen this URL in your browser:\n\n${url}\n`);
     };
     const onPrompt = async (prompt: { message: string }) => {
       return String(
@@ -220,10 +209,10 @@ async function runAnthropicOAuth(ctx: ProviderAuthContext): Promise<ProviderAuth
     const creds: OAuthCredentials | null = await loginAnthropic({
       onAuth,
       onPrompt,
-      onManualCodeInput: isRemote
-        ? async () =>
-            await onPrompt({ message: "Paste the authorization code (or full redirect URL):" })
-        : undefined,
+      onManualCodeInput: async () =>
+        await onPrompt({
+          message: "Paste the authorization code or full redirect URL:",
+        }),
       onProgress: (msg: string) => spin.update(msg),
     });
 
