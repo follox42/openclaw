@@ -1,3 +1,4 @@
+import { loginAnthropic, type OAuthCredentials } from "@mariozechner/pi-ai/oauth";
 import { formatCliCommand } from "openclaw/plugin-sdk/cli-runtime";
 import { parseDurationMs } from "openclaw/plugin-sdk/cli-runtime";
 import {
@@ -173,6 +174,92 @@ function buildAnthropicAuthDoctorHint(params: {
     `- suggested profile: ${suggested}`,
     `Fix: run "${formatCliCommand("openclaw doctor --yes")}"`,
   ].join("\n");
+}
+
+async function runAnthropicOAuth(ctx: ProviderAuthContext): Promise<ProviderAuthResult> {
+  const isRemote = !process.stdout.isTTY || Boolean(process.env.SSH_CONNECTION);
+  const openUrl = async (url: string) => {
+    ctx.runtime.log(`Open this URL in your browser:\n\n${url}\n`);
+  };
+
+  await ctx.prompter.note(
+    isRemote
+      ? [
+          "You are running in a remote/VPS environment.",
+          "A URL will be shown for you to open in your LOCAL browser.",
+          "After signing in, paste the redirect URL back here.",
+        ].join("\n")
+      : [
+          "Browser will open for Anthropic authentication.",
+          "If the callback doesn't auto-complete, paste the redirect URL.",
+          "Anthropic OAuth uses localhost:53692 for the callback.",
+        ].join("\n"),
+    "Anthropic OAuth",
+  );
+
+  const spin = ctx.prompter.progress("Starting OAuth flow…");
+  try {
+    const onAuth = async ({ url }: { url: string }) => {
+      if (isRemote) {
+        spin.stop("OAuth URL ready");
+        ctx.runtime.log(`\nOpen this URL in your LOCAL browser:\n\n${url}\n`);
+        return;
+      }
+      spin.update("Complete sign-in in browser…");
+      await openUrl(url);
+    };
+    const onPrompt = async (prompt: { message: string }) => {
+      return String(
+        (await ctx.prompter.text({
+          message: prompt.message,
+          validate: (v) => (String(v ?? "").trim().length > 0 ? undefined : "Required"),
+        })) ?? "",
+      );
+    };
+
+    const creds: OAuthCredentials | null = await loginAnthropic({
+      onAuth,
+      onPrompt,
+      onManualCodeInput: isRemote
+        ? async () =>
+            await onPrompt({ message: "Paste the authorization code (or full redirect URL):" })
+        : undefined,
+      onProgress: (msg: string) => spin.update(msg),
+    });
+
+    spin.stop("Anthropic OAuth complete");
+
+    if (!creds) {
+      throw new Error("OAuth flow returned no credentials.");
+    }
+
+    const profileNameRaw = await ctx.prompter.text({
+      message: "Profile name (blank = default)",
+      placeholder: "default",
+    });
+
+    return {
+      profiles: [
+        {
+          profileId: buildTokenProfileId({
+            provider: PROVIDER_ID,
+            name: String(profileNameRaw ?? ""),
+          }),
+          credential: {
+            type: "oauth",
+            provider: PROVIDER_ID,
+            access: creds.access,
+            refresh: creds.refresh,
+            expires: creds.expires,
+          },
+        },
+      ],
+      defaultModel: DEFAULT_ANTHROPIC_MODEL,
+    };
+  } catch (err) {
+    spin.stop("Anthropic OAuth failed");
+    throw err;
+  }
 }
 
 async function runAnthropicSetupToken(ctx: ProviderAuthContext): Promise<ProviderAuthResult> {
@@ -396,7 +483,7 @@ export default definePluginEntry({
             choiceHint: "Reuse a local Claude CLI login on this host",
             groupId: "anthropic",
             groupLabel: "Anthropic",
-            groupHint: "Claude CLI + setup-token + API key",
+            groupHint: "OAuth + Claude CLI + setup-token + API key",
             modelAllowlist: {
               allowedKeys: [...ANTHROPIC_OAUTH_ALLOWLIST].map((model) =>
                 model.replace(/^anthropic\//, "claude-cli/"),
@@ -413,6 +500,26 @@ export default definePluginEntry({
             }),
         },
         {
+          id: "oauth",
+          label: "OAuth (browser login)",
+          hint: "Sign in via browser — gets its own credentials, auto-refreshes",
+          kind: "custom",
+          wizard: {
+            choiceId: "anthropic-oauth",
+            choiceLabel: "Anthropic OAuth (browser login)",
+            choiceHint: "Sign in via browser, separate credentials, auto-refresh",
+            groupId: "anthropic",
+            groupLabel: "Anthropic",
+            groupHint: "OAuth + Claude CLI + setup-token + API key",
+            modelAllowlist: {
+              allowedKeys: [...ANTHROPIC_OAUTH_ALLOWLIST],
+              initialSelections: ["anthropic/claude-sonnet-4-6"],
+              message: "Anthropic OAuth models",
+            },
+          },
+          run: async (ctx: ProviderAuthContext) => await runAnthropicOAuth(ctx),
+        },
+        {
           id: "setup-token",
           label: "setup-token (claude)",
           hint: "Paste a setup-token from `claude setup-token`",
@@ -423,7 +530,7 @@ export default definePluginEntry({
             choiceHint: "Run `claude setup-token` elsewhere, then paste the token here",
             groupId: "anthropic",
             groupLabel: "Anthropic",
-            groupHint: "Claude CLI + setup-token + API key",
+            groupHint: "OAuth + Claude CLI + setup-token + API key",
             modelAllowlist: {
               allowedKeys: [...ANTHROPIC_OAUTH_ALLOWLIST],
               initialSelections: ["anthropic/claude-sonnet-4-6"],
@@ -455,7 +562,7 @@ export default definePluginEntry({
             choiceLabel: "Anthropic API key",
             groupId: "anthropic",
             groupLabel: "Anthropic",
-            groupHint: "Claude CLI + setup-token + API key",
+            groupHint: "OAuth + Claude CLI + setup-token + API key",
           },
         }),
       ],
