@@ -237,23 +237,26 @@ RUN ln -sf /app/openclaw.mjs /usr/local/bin/openclaw \
 
 ENV NODE_ENV=production
 
+# Bake gateway config for Coolify reverse proxy deployment.
+# Without this, the gateway listens only on 127.0.0.1 (loopback default) and
+# Traefik returns 502 because it cannot reach the container's bridge IP:18789.
+#  - bind=lan        → listen on 0.0.0.0 so the reverse proxy can connect
+#  - auth.mode=password → password value comes from OPENCLAW_GATEWAY_PASSWORD env
+#  - controlUi.allowedOrigins → required when accessed via non-loopback host
+RUN mkdir -p /home/node/.openclaw && \
+    printf '%s' '{"gateway":{"mode":"local","bind":"lan","port":18789,"auth":{"mode":"password"},"controlUi":{"allowedOrigins":["https://openclaw-dev.nocode18.com","http://openclaw-dev.nocode18.com"]}}}' > /home/node/.openclaw/openclaw.json && \
+    chown -R node:node /home/node/.openclaw
+
 # Security hardening: Run as non-root user
 # The node:24-bookworm image includes a 'node' user (uid 1000)
 # This reduces the attack surface by preventing container escape via root privileges
 USER node
 
-# Start gateway server with default config.
-# Binds to loopback (127.0.0.1) by default for security.
-#
-# IMPORTANT: With Docker bridge networking (-p 18789:18789), loopback bind
-# makes the gateway unreachable from the host. Either:
-#   - Use --network host, OR
-#   - Override --bind to "lan" (0.0.0.0) and set auth credentials
+# Start gateway server. Config is at /home/node/.openclaw/openclaw.json (baked above).
 #
 # Built-in probe endpoints for container health checks:
 #   - GET /healthz (liveness) and GET /readyz (readiness)
 #   - aliases: /health and /ready
-# For external access from host/ingress, override bind to "lan" and set auth.
 HEALTHCHECK --interval=3m --timeout=10s --start-period=15s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]
+CMD ["node", "openclaw.mjs", "gateway"]
