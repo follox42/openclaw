@@ -1,18 +1,39 @@
 import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
-import { loadConfig } from "../config/config.js";
+import { extractTextFromChatContent } from "../shared/chat-content.js";
 import {
+  captureSubagentCompletionReplyUsing,
+  readLatestSubagentOutputWithRetryUsing,
+} from "./subagent-announce-capture.js";
+import {
+  callGateway,
+  getRuntimeConfig,
   loadSessionStore,
   resolveAgentIdFromSessionKey,
   resolveStorePath,
-} from "../config/sessions.js";
-import { callGateway } from "../gateway/call.js";
-import { extractTextFromChatContent } from "../shared/chat-content.js";
+} from "./subagent-announce.runtime.js";
 import { readLatestAssistantReply } from "./tools/agent-step.js";
-import { sanitizeTextContent, extractAssistantText } from "./tools/sessions-helpers.js";
-import { isAnnounceSkip } from "./tools/sessions-send-helpers.js";
+import { extractAssistantText, sanitizeTextContent } from "./tools/session-message-text.js";
+import { isAnnounceSkip } from "./tools/sessions-send-tokens.js";
 
-const FAST_TEST_MODE = process.env.OPENCLAW_TEST_FAST === "1";
 const FAST_TEST_RETRY_INTERVAL_MS = 8;
+
+type SubagentAnnounceOutputDeps = {
+  callGateway: typeof callGateway;
+  getRuntimeConfig: typeof getRuntimeConfig;
+  readLatestAssistantReply: typeof readLatestAssistantReply;
+};
+
+const defaultSubagentAnnounceOutputDeps: SubagentAnnounceOutputDeps = {
+  callGateway,
+  getRuntimeConfig,
+  readLatestAssistantReply,
+};
+
+let subagentAnnounceOutputDeps: SubagentAnnounceOutputDeps = defaultSubagentAnnounceOutputDeps;
+
+function isFastTestMode() {
+  return process.env.OPENCLAW_TEST_FAST === "1";
+}
 
 type ToolResultMessage = {
   role?: unknown;
@@ -37,7 +58,36 @@ export type AgentWaitResult = {
 export type SubagentRunOutcome = {
   status: "ok" | "error" | "timeout" | "unknown";
   error?: string;
+  startedAt?: number;
+  endedAt?: number;
+  elapsedMs?: number;
 };
+
+function readFiniteNumber(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+export function withSubagentOutcomeTiming(
+  outcome: SubagentRunOutcome,
+  timing: {
+    startedAt?: number;
+    endedAt?: number;
+  },
+): SubagentRunOutcome {
+  const startedAt = readFiniteNumber(timing.startedAt) ?? readFiniteNumber(outcome.startedAt);
+  const endedAt = readFiniteNumber(timing.endedAt) ?? readFiniteNumber(outcome.endedAt);
+  const nextTiming: Pick<SubagentRunOutcome, "startedAt" | "endedAt" | "elapsedMs"> = {};
+  if (typeof startedAt === "number") {
+    nextTiming.startedAt = startedAt;
+  }
+  if (typeof endedAt === "number") {
+    nextTiming.endedAt = endedAt;
+  }
+  if (typeof startedAt === "number" && typeof endedAt === "number") {
+    nextTiming.elapsedMs = Math.max(0, endedAt - startedAt);
+  }
+  return { ...outcome, ...nextTiming };
+}
 
 function extractToolResultText(content: unknown): string {
   if (typeof content === "string") {
@@ -102,17 +152,10 @@ function extractSubagentOutputText(message: unknown): string {
   const role = (message as { role?: unknown }).role;
   const content = (message as { content?: unknown }).content;
   if (role === "assistant") {
-    const assistantText = extractAssistantText(message);
-    if (assistantText) {
-      return assistantText;
-    }
     if (typeof content === "string") {
       return sanitizeTextContent(content);
     }
-    if (Array.isArray(content)) {
-      return extractInlineTextContent(content);
-    }
-    return "";
+    return extractAssistantText(message) ?? "";
   }
   if (role === "toolResult" || role === "tool") {
     return extractToolResultText((message as ToolResultMessage).content);
@@ -230,7 +273,7 @@ export async function readSubagentOutput(
   sessionKey: string,
   outcome?: SubagentRunOutcome,
 ): Promise<string | undefined> {
-  const history = await callGateway<{ messages?: Array<unknown> }>({
+  const history = await subagentAnnounceOutputDeps.callGateway({
     method: "chat.history",
     params: { sessionKey, limit: 100 },
   });
@@ -239,7 +282,10 @@ export async function readSubagentOutput(
   if (selected?.trim()) {
     return selected;
   }
-  const latestAssistant = await readLatestAssistantReply({ sessionKey, limit: 100 });
+  const latestAssistant = await subagentAnnounceOutputDeps.readLatestAssistantReply({
+    sessionKey,
+    limit: 100,
+  });
   return latestAssistant?.trim() ? latestAssistant : undefined;
 }
 
@@ -248,17 +294,13 @@ export async function readLatestSubagentOutputWithRetry(params: {
   maxWaitMs: number;
   outcome?: SubagentRunOutcome;
 }): Promise<string | undefined> {
-  const retryIntervalMs = FAST_TEST_MODE ? FAST_TEST_RETRY_INTERVAL_MS : 100;
-  const deadline = Date.now() + Math.max(0, Math.min(params.maxWaitMs, 15_000));
-  let result: string | undefined;
-  while (Date.now() < deadline) {
-    result = await readSubagentOutput(params.sessionKey, params.outcome);
-    if (result?.trim()) {
-      return result;
-    }
-    await new Promise((resolve) => setTimeout(resolve, retryIntervalMs));
-  }
-  return result;
+  return await readLatestSubagentOutputWithRetryUsing({
+    sessionKey: params.sessionKey,
+    maxWaitMs: params.maxWaitMs,
+    outcome: params.outcome,
+    retryIntervalMs: isFastTestMode() ? FAST_TEST_RETRY_INTERVAL_MS : 100,
+    readSubagentOutput,
+  });
 }
 
 export async function waitForSubagentRunOutcome(
@@ -266,7 +308,7 @@ export async function waitForSubagentRunOutcome(
   timeoutMs: number,
 ): Promise<AgentWaitResult> {
   const waitMs = Math.max(0, Math.floor(timeoutMs));
-  return await callGateway<AgentWaitResult>({
+  return await subagentAnnounceOutputDeps.callGateway({
     method: "agent.wait",
     params: {
       runId,
@@ -287,33 +329,36 @@ export function applySubagentWaitOutcome(params: {
     startedAt: params.startedAt,
     endedAt: params.endedAt,
   };
-  const waitError = typeof params.wait?.error === "string" ? params.wait.error : undefined;
-  if (params.wait?.status === "timeout") {
-    next.outcome = { status: "timeout" };
-  } else if (params.wait?.status === "error") {
-    next.outcome = { status: "error", error: waitError };
-  } else if (params.wait?.status === "ok") {
-    next.outcome = { status: "ok" };
-  }
-  if (typeof params.wait?.startedAt === "number" && !next.startedAt) {
+  if (typeof params.wait?.startedAt === "number" && typeof next.startedAt !== "number") {
     next.startedAt = params.wait.startedAt;
   }
-  if (typeof params.wait?.endedAt === "number" && !next.endedAt) {
+  if (typeof params.wait?.endedAt === "number" && typeof next.endedAt !== "number") {
     next.endedAt = params.wait.endedAt;
   }
+  const waitError = typeof params.wait?.error === "string" ? params.wait.error : undefined;
+  let outcome = next.outcome;
+  if (params.wait?.status === "timeout") {
+    outcome = { status: "timeout" };
+  } else if (params.wait?.status === "error") {
+    outcome = { status: "error", error: waitError };
+  } else if (params.wait?.status === "ok") {
+    outcome = { status: "ok" };
+  }
+  next.outcome = outcome ? withSubagentOutcomeTiming(outcome, next) : undefined;
   return next;
 }
 
 export async function captureSubagentCompletionReply(
   sessionKey: string,
+  options?: { waitForReply?: boolean; outcome?: SubagentRunOutcome },
 ): Promise<string | undefined> {
-  const immediate = await readSubagentOutput(sessionKey);
-  if (immediate?.trim()) {
-    return immediate;
-  }
-  return await readLatestSubagentOutputWithRetry({
+  return await captureSubagentCompletionReplyUsing({
     sessionKey,
-    maxWaitMs: FAST_TEST_MODE ? 50 : 1_500,
+    waitForReply: options?.waitForReply,
+    maxWaitMs: isFastTestMode() ? 50 : 1_500,
+    retryIntervalMs: isFastTestMode() ? FAST_TEST_RETRY_INTERVAL_MS : 100,
+    readSubagentOutput: async (nextSessionKey) =>
+      await readSubagentOutput(nextSessionKey, options?.outcome),
   });
 }
 
@@ -478,11 +523,11 @@ export async function buildCompactAnnounceStatsLine(params: {
   startedAt?: number;
   endedAt?: number;
 }) {
-  const cfg = loadConfig();
+  const cfg = subagentAnnounceOutputDeps.getRuntimeConfig();
   const agentId = resolveAgentIdFromSessionKey(params.sessionKey);
   const storePath = resolveStorePath(cfg.session?.store, { agentId });
   let entry = loadSessionStore(storePath)[params.sessionKey];
-  const tokenWaitAttempts = FAST_TEST_MODE ? 1 : 3;
+  const tokenWaitAttempts = isFastTestMode() ? 1 : 3;
   for (let attempt = 0; attempt < tokenWaitAttempts; attempt += 1) {
     const hasTokenData =
       typeof entry?.inputTokens === "number" ||
@@ -491,7 +536,7 @@ export async function buildCompactAnnounceStatsLine(params: {
     if (hasTokenData) {
       break;
     }
-    if (!FAST_TEST_MODE) {
+    if (!isFastTestMode()) {
       await new Promise((resolve) => setTimeout(resolve, 150));
     }
     entry = loadSessionStore(storePath)[params.sessionKey];
@@ -515,3 +560,14 @@ export async function buildCompactAnnounceStatsLine(params: {
   }
   return `Stats: ${parts.join(" • ")}`;
 }
+
+export const __testing = {
+  setDepsForTest(overrides?: Partial<SubagentAnnounceOutputDeps>) {
+    subagentAnnounceOutputDeps = overrides
+      ? {
+          ...defaultSubagentAnnounceOutputDeps,
+          ...overrides,
+        }
+      : defaultSubagentAnnounceOutputDeps;
+  },
+};

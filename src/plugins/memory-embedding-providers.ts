@@ -1,6 +1,6 @@
-import type { EmbeddingInput } from "../../packages/memory-host-sdk/src/host/embedding-inputs.js";
-import type { OpenClawConfig } from "../config/config.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { SecretInput } from "../config/types.secrets.js";
+import type { EmbeddingInput } from "../memory-host-sdk/host/embedding-inputs.js";
 
 export type MemoryEmbeddingBatchChunk = {
   text: string;
@@ -20,6 +20,8 @@ export type MemoryEmbeddingBatchOptions = {
 export type MemoryEmbeddingProviderRuntime = {
   id: string;
   cacheKeyData?: Record<string, unknown>;
+  inlineQueryTimeoutMs?: number;
+  inlineBatchTimeoutMs?: number;
   batchEmbed?: (options: MemoryEmbeddingBatchOptions) => Promise<number[][] | null>;
 };
 
@@ -35,17 +37,30 @@ export type MemoryEmbeddingProvider = {
 export type MemoryEmbeddingProviderCreateOptions = {
   config: OpenClawConfig;
   agentDir?: string;
+  provider?: string;
+  fallback?: string;
   remote?: {
     baseUrl?: string;
     apiKey?: SecretInput;
     headers?: Record<string, string>;
   };
   model: string;
+  inputType?: string;
+  queryInputType?: string;
+  documentInputType?: string;
   local?: {
     modelPath?: string;
     modelCacheDir?: string;
   };
   outputDimensionality?: number;
+  taskType?:
+    | "RETRIEVAL_QUERY"
+    | "RETRIEVAL_DOCUMENT"
+    | "SEMANTIC_SIMILARITY"
+    | "CLASSIFICATION"
+    | "CLUSTERING"
+    | "QUESTION_ANSWERING"
+    | "FACT_VERIFICATION";
 };
 
 export type MemoryEmbeddingProviderCreateResult = {
@@ -57,6 +72,7 @@ export type MemoryEmbeddingProviderAdapter = {
   id: string;
   defaultModel?: string;
   transport?: "local" | "remote";
+  authProviderId?: string;
   autoSelectPriority?: number;
   allowExplicitWhenConfiguredAuto?: boolean;
   supportsMultimodalEmbeddings?: (params: { model: string }) => boolean;
@@ -72,13 +88,24 @@ export type RegisteredMemoryEmbeddingProvider = {
   ownerPluginId?: string;
 };
 
-const memoryEmbeddingProviders = new Map<string, RegisteredMemoryEmbeddingProvider>();
+const MEMORY_EMBEDDING_PROVIDERS_KEY = Symbol.for("openclaw.memoryEmbeddingProviders");
+
+function getMemoryEmbeddingProviders(): Map<string, RegisteredMemoryEmbeddingProvider> {
+  const globalStore = globalThis as Record<PropertyKey, unknown>;
+  const existing = globalStore[MEMORY_EMBEDDING_PROVIDERS_KEY];
+  if (existing instanceof Map) {
+    return existing as Map<string, RegisteredMemoryEmbeddingProvider>;
+  }
+  const created = new Map<string, RegisteredMemoryEmbeddingProvider>();
+  globalStore[MEMORY_EMBEDDING_PROVIDERS_KEY] = created;
+  return created;
+}
 
 export function registerMemoryEmbeddingProvider(
   adapter: MemoryEmbeddingProviderAdapter,
   options?: { ownerPluginId?: string },
 ): void {
-  memoryEmbeddingProviders.set(adapter.id, {
+  getMemoryEmbeddingProviders().set(adapter.id, {
     adapter,
     ownerPluginId: options?.ownerPluginId,
   });
@@ -87,15 +114,15 @@ export function registerMemoryEmbeddingProvider(
 export function getRegisteredMemoryEmbeddingProvider(
   id: string,
 ): RegisteredMemoryEmbeddingProvider | undefined {
-  return memoryEmbeddingProviders.get(id);
+  return getMemoryEmbeddingProviders().get(id);
 }
 
 export function getMemoryEmbeddingProvider(id: string): MemoryEmbeddingProviderAdapter | undefined {
-  return memoryEmbeddingProviders.get(id)?.adapter;
+  return getMemoryEmbeddingProviders().get(id)?.adapter;
 }
 
 export function listRegisteredMemoryEmbeddingProviders(): RegisteredMemoryEmbeddingProvider[] {
-  return Array.from(memoryEmbeddingProviders.values());
+  return Array.from(getMemoryEmbeddingProviders().values());
 }
 
 export function listMemoryEmbeddingProviders(): MemoryEmbeddingProviderAdapter[] {
@@ -103,7 +130,7 @@ export function listMemoryEmbeddingProviders(): MemoryEmbeddingProviderAdapter[]
 }
 
 export function restoreMemoryEmbeddingProviders(adapters: MemoryEmbeddingProviderAdapter[]): void {
-  memoryEmbeddingProviders.clear();
+  getMemoryEmbeddingProviders().clear();
   for (const adapter of adapters) {
     registerMemoryEmbeddingProvider(adapter);
   }
@@ -112,7 +139,7 @@ export function restoreMemoryEmbeddingProviders(adapters: MemoryEmbeddingProvide
 export function restoreRegisteredMemoryEmbeddingProviders(
   entries: RegisteredMemoryEmbeddingProvider[],
 ): void {
-  memoryEmbeddingProviders.clear();
+  getMemoryEmbeddingProviders().clear();
   for (const entry of entries) {
     registerMemoryEmbeddingProvider(entry.adapter, {
       ownerPluginId: entry.ownerPluginId,
@@ -121,7 +148,7 @@ export function restoreRegisteredMemoryEmbeddingProviders(
 }
 
 export function clearMemoryEmbeddingProviders(): void {
-  memoryEmbeddingProviders.clear();
+  getMemoryEmbeddingProviders().clear();
 }
 
 export const _resetMemoryEmbeddingProviders = clearMemoryEmbeddingProviders;

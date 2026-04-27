@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../../config/config.js";
+import { resolveAgentModelPrimaryValue } from "../../../config/model-input.js";
 import { applyNonInteractiveAuthChoice } from "./auth-choice.js";
 
 const applyNonInteractivePluginProviderChoice = vi.hoisted(() => vi.fn(async () => undefined));
@@ -35,12 +36,12 @@ describe("applyNonInteractiveAuthChoice", () => {
   it("resolves plugin provider auth before builtin custom-provider handling", async () => {
     const runtime = createRuntime();
     const nextConfig = { agents: { defaults: {} } } as OpenClawConfig;
-    const resolvedConfig = { auth: { profiles: { "openai:default": { mode: "api_key" } } } };
+    const resolvedConfig = { auth: { profiles: { "demo-provider:default": { mode: "api_key" } } } };
     applyNonInteractivePluginProviderChoice.mockResolvedValueOnce(resolvedConfig as never);
 
     const result = await applyNonInteractiveAuthChoice({
       nextConfig,
-      authChoice: "openai-api-key",
+      authChoice: "demo-provider-api-key",
       opts: {} as never,
       runtime: runtime as never,
       baseConfig: nextConfig,
@@ -54,12 +55,12 @@ describe("applyNonInteractiveAuthChoice", () => {
     const runtime = createRuntime();
     const nextConfig = { agents: { defaults: {} } } as OpenClawConfig;
     resolveManifestDeprecatedProviderAuthChoice.mockReturnValueOnce({
-      choiceId: "minimax-global-api",
+      choiceId: "demo-provider-modern-api",
     } as never);
 
     const result = await applyNonInteractiveAuthChoice({
       nextConfig,
-      authChoice: "minimax",
+      authChoice: "demo-provider-legacy",
       opts: {} as never,
       runtime: runtime as never,
       baseConfig: nextConfig,
@@ -67,9 +68,72 @@ describe("applyNonInteractiveAuthChoice", () => {
 
     expect(result).toBeNull();
     expect(runtime.error).toHaveBeenCalledWith(
-      '"minimax" is no longer supported. Use --auth-choice minimax-global-api instead.',
+      '"demo-provider-legacy" is no longer supported. Use --auth-choice "demo-provider-modern-api" instead.',
     );
     expect(runtime.exit).toHaveBeenCalledWith(1);
     expect(applyNonInteractivePluginProviderChoice).toHaveBeenCalledOnce();
+  });
+
+  it("escapes deprecated auth choice guidance for terminal output", async () => {
+    const runtime = createRuntime();
+    const nextConfig = { agents: { defaults: {} } } as OpenClawConfig;
+    resolveManifestDeprecatedProviderAuthChoice.mockReturnValueOnce({
+      choiceId: "modern\nchoice",
+    } as never);
+
+    const result = await applyNonInteractiveAuthChoice({
+      nextConfig,
+      authChoice: "legacy\u001b[31mchoice",
+      opts: {} as never,
+      runtime: runtime as never,
+      baseConfig: nextConfig,
+    });
+
+    expect(result).toBeNull();
+    expect(runtime.error).toHaveBeenCalledWith(
+      '"legacy\\u001b[31mchoice" is no longer supported. Use --auth-choice "modern\\nchoice" instead.',
+    );
+    expect(runtime.exit).toHaveBeenCalledWith(1);
+    expect(applyNonInteractivePluginProviderChoice).toHaveBeenCalledOnce();
+  });
+
+  it("stores custom provider env refs through the local auth-choice seam", async () => {
+    const runtime = createRuntime();
+    const nextConfig = { agents: { defaults: {} } } as OpenClawConfig;
+    resolveNonInteractiveApiKey.mockResolvedValueOnce({
+      key: "custom-env-key",
+      source: "env",
+      envVarName: "CUSTOM_API_KEY",
+    });
+
+    const result = await applyNonInteractiveAuthChoice({
+      nextConfig,
+      authChoice: "custom-api-key",
+      opts: {
+        customBaseUrl: "https://models.custom.local/v1",
+        customModelId: "local-large",
+        secretInputMode: "ref",
+      } as never,
+      runtime: runtime as never,
+      baseConfig: nextConfig,
+    });
+
+    expect(result?.models?.providers?.["custom-models-custom-local"]?.apiKey).toEqual({
+      source: "env",
+      provider: "default",
+      id: "CUSTOM_API_KEY",
+    });
+    expect(resolveAgentModelPrimaryValue(result?.agents?.defaults?.model)).toBe(
+      "custom-models-custom-local/local-large",
+    );
+    expect(resolveNonInteractiveApiKey).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: "custom-models-custom-local",
+        flagName: "--custom-api-key",
+        envVar: "CUSTOM_API_KEY",
+        envVarName: "CUSTOM_API_KEY",
+        secretInputMode: "ref",
+      }),
+    );
   });
 });
