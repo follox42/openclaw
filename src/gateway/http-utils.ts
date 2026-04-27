@@ -9,36 +9,37 @@ import {
 } from "../agents/model-selection.js";
 import { loadConfig } from "../config/config.js";
 import { buildAgentMainSessionKey, normalizeAgentId } from "../routing/session-key.js";
+import {
+  normalizeLowercaseStringOrEmpty,
+  normalizeOptionalString,
+} from "../shared/string-coerce.js";
 import { normalizeMessageChannel } from "../utils/message-channel.js";
+import { getHeader } from "./http-auth-utils.js";
 import { loadGatewayModelCatalog } from "./server-model-catalog.js";
+
+export {
+  authorizeGatewayHttpRequestOrReply,
+  authorizeScopedGatewayHttpRequestOrReply,
+  checkGatewayHttpRequestAuth,
+  getBearerToken,
+  getHeader,
+  isGatewayBearerHttpRequest,
+  resolveHttpBrowserOriginPolicy,
+  resolveHttpSenderIsOwner,
+  resolveOpenAiCompatibleHttpOperatorScopes,
+  resolveOpenAiCompatibleHttpSenderIsOwner,
+  resolveTrustedHttpOperatorScopes,
+  type AuthorizedGatewayHttpRequest,
+  type GatewayHttpRequestAuthCheckResult,
+} from "./http-auth-utils.js";
 
 export const OPENCLAW_MODEL_ID = "openclaw";
 export const OPENCLAW_DEFAULT_MODEL_ID = "openclaw/default";
 
-export function getHeader(req: IncomingMessage, name: string): string | undefined {
-  const raw = req.headers[name.toLowerCase()];
-  if (typeof raw === "string") {
-    return raw;
-  }
-  if (Array.isArray(raw)) {
-    return raw[0];
-  }
-  return undefined;
-}
-
-export function getBearerToken(req: IncomingMessage): string | undefined {
-  const raw = getHeader(req, "authorization")?.trim() ?? "";
-  if (!raw.toLowerCase().startsWith("bearer ")) {
-    return undefined;
-  }
-  const token = raw.slice(7).trim();
-  return token || undefined;
-}
-
 export function resolveAgentIdFromHeader(req: IncomingMessage): string | undefined {
   const raw =
-    getHeader(req, "x-openclaw-agent-id")?.trim() ||
-    getHeader(req, "x-openclaw-agent")?.trim() ||
+    normalizeOptionalString(getHeader(req, "x-openclaw-agent-id")) ||
+    normalizeOptionalString(getHeader(req, "x-openclaw-agent")) ||
     "";
   if (!raw) {
     return undefined;
@@ -54,7 +55,7 @@ export function resolveAgentIdFromModel(
   if (!raw) {
     return undefined;
   }
-  const lowered = raw.toLowerCase();
+  const lowered = normalizeLowercaseStringOrEmpty(raw);
   if (lowered === OPENCLAW_MODEL_ID || lowered === OPENCLAW_DEFAULT_MODEL_ID) {
     return resolveDefaultAgentId(cfg);
   }

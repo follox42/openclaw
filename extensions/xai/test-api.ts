@@ -1,1 +1,1 @@
-export { __testing } from "./src/grok-web-search-provider.js";
+export { __testing } from "./src/web-search-provider.runtime.js";

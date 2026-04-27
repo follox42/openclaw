@@ -10,9 +10,10 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { OpenClawPluginApi } from "../runtime-api.js";
+import { Readable } from "node:stream";
 import type { MattermostConfig } from "../types.js";
 import type { ResolvedMattermostAccount } from "./accounts.js";
+import type { OpenClawPluginApi } from "./runtime-api.js";
 import { resolveSlashCommandConfig, type MattermostRegisteredCommand } from "./slash-commands.js";
 import { createSlashCommandHttpHandler } from "./slash-http.js";
 
@@ -54,7 +55,7 @@ export function resolveSlashHandlerForToken(token: string): {
     return { kind: "none" };
   }
   if (matches.length === 1) {
-    return { kind: "single", handler: matches[0]!.handler, accountIds: [matches[0]!.accountId] };
+    return { kind: "single", handler: matches[0].handler, accountIds: [matches[0].accountId] };
   }
 
   return {
@@ -87,8 +88,8 @@ export function activateSlashCommands(params: {
   registeredCommands: MattermostRegisteredCommand[];
   triggerMap?: Map<string, string>;
   api: {
-    cfg: import("../runtime-api.js").OpenClawConfig;
-    runtime: import("../runtime-api.js").RuntimeEnv;
+    cfg: import("./runtime-api.js").OpenClawConfig;
+    runtime: import("./runtime-api.js").RuntimeEnv;
   };
   log?: (msg: string) => void;
 }) {
@@ -206,7 +207,7 @@ export function registerSlashCommandRoute(api: OpenClawPluginApi) {
 
     // If there's only one active account (common case), route directly.
     if (accountStates.size === 1) {
-      const [, state] = [...accountStates.entries()][0]!;
+      const [, state] = [...accountStates.entries()][0];
       if (!state.handler) {
         res.statusCode = 503;
         res.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -284,7 +285,6 @@ export function registerSlashCommandRoute(api: OpenClawPluginApi) {
     const matchedHandler = match.handler!;
 
     // Replay: create a synthetic readable that re-emits the buffered body
-    const { Readable } = await import("node:stream");
     const syntheticReq = new Readable({
       read() {
         this.push(Buffer.from(bodyStr, "utf8"));

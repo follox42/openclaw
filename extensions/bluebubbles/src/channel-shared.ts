@@ -1,4 +1,4 @@
-import { describeAccountSnapshot } from "openclaw/plugin-sdk/account-helpers";
+import { describeWebhookAccountSnapshot } from "openclaw/plugin-sdk/account-helpers";
 import { formatNormalizedAllowFromEntries } from "openclaw/plugin-sdk/allow-from";
 import {
   adaptScopedAccountAccessor,
@@ -31,6 +31,12 @@ export const bluebubblesMeta = {
 export const bluebubblesCapabilities: ChannelPlugin<ResolvedBlueBubblesAccount>["capabilities"] = {
   chatTypes: ["direct", "group"],
   media: true,
+  tts: {
+    voice: {
+      synthesisTarget: "audio-file",
+      audioFileFormats: ["mp3", "caf", "audio/mpeg", "audio/x-caf"],
+    },
+  },
   reactions: true,
   edit: true,
   unsend: true,
@@ -58,7 +64,7 @@ export const bluebubblesConfigAdapter =
   });
 
 export function describeBlueBubblesAccount(account: ResolvedBlueBubblesAccount) {
-  return describeAccountSnapshot({
+  return describeWebhookAccountSnapshot({
     account,
     configured: account.configured,
     extra: {

@@ -1,7 +1,8 @@
-import type { OpenClawConfig } from "../config/config.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { buildGatewayConnectionDetails, callGateway } from "../gateway/call.js";
 import type { DoctorMemoryStatusPayload } from "../gateway/server-methods/doctor.js";
 import { collectChannelStatusIssues } from "../infra/channels-status-issues.js";
+import { formatErrorMessage } from "../infra/errors.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { note } from "../terminal/note.js";
 import { formatHealthCheckFailure } from "./health-format.js";
@@ -12,6 +13,10 @@ export type GatewayMemoryProbe = {
   ready: boolean;
   error?: string;
 };
+
+function isGatewayCallTimeout(message: string): boolean {
+  return /^gateway timeout after \d+ms(?:\n|$)/.test(message);
+}
 
 export async function checkGatewayHealth(params: {
   runtime: RuntimeEnv;
@@ -82,7 +87,14 @@ export async function probeGatewayMemoryStatus(params: {
       error: payload.embedding.error,
     };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = formatErrorMessage(err);
+    if (isGatewayCallTimeout(message)) {
+      return {
+        checked: false,
+        ready: false,
+        error: `gateway memory probe timed out: ${message}`,
+      };
+    }
     return {
       checked: true,
       ready: false,

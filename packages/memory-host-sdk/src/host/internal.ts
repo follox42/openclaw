@@ -3,6 +3,12 @@ import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { detectMime } from "../../../../src/media/mime.js";
+import {
+  CANONICAL_ROOT_MEMORY_FILENAME,
+  resolveCanonicalRootMemoryFile,
+  shouldSkipRootMemoryAuxiliaryPath,
+} from "../../../../src/memory/root-memory-files.js";
+import { CHARS_PER_TOKEN_ESTIMATE, estimateStringChars } from "../../../../src/utils/cjk-chars.js";
 import { runTasksWithConcurrency } from "../../../../src/utils/run-with-concurrency.js";
 import { estimateStructuredEmbeddingInputBytes } from "./embedding-input-limits.js";
 import { buildTextEmbeddingInput, type EmbeddingInput } from "./embedding-inputs.js";
@@ -13,6 +19,9 @@ import {
   type MemoryMultimodalModality,
   type MemoryMultimodalSettings,
 } from "./multimodal.js";
+
+export { hashText } from "./hash.js";
+import { hashText } from "./hash.js";
 
 export type MemoryFileEntry = {
   path: string;
@@ -76,7 +85,7 @@ export function isMemoryPath(relPath: string): boolean {
   if (!normalized) {
     return false;
   }
-  if (normalized === "MEMORY.md" || normalized === "memory.md") {
+  if (normalized === CANONICAL_ROOT_MEMORY_FILENAME || normalized === "dreams.md") {
     return true;
   }
   return normalized.startsWith("memory/");
@@ -91,15 +100,26 @@ function isAllowedMemoryFilePath(filePath: string, multimodal?: MemoryMultimodal
   );
 }
 
-async function walkDir(dir: string, files: string[], multimodal?: MemoryMultimodalSettings) {
+async function walkDir(
+  dir: string,
+  files: string[],
+  multimodal?: MemoryMultimodalSettings,
+  shouldSkipPath?: (absPath: string) => boolean,
+) {
   const entries = await fs.readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
+    if (shouldSkipPath?.(full)) {
+      continue;
+    }
     if (entry.isSymbolicLink()) {
       continue;
     }
     if (entry.isDirectory()) {
-      await walkDir(full, files, multimodal);
+      if (entry.name === ".openclaw-repair") {
+        continue;
+      }
+      await walkDir(full, files, multimodal, shouldSkipPath);
       continue;
     }
     if (!entry.isFile()) {
@@ -118,9 +138,10 @@ export async function listMemoryFiles(
   multimodal?: MemoryMultimodalSettings,
 ): Promise<string[]> {
   const result: string[] = [];
-  const memoryFile = path.join(workspaceDir, "MEMORY.md");
-  const altMemoryFile = path.join(workspaceDir, "memory.md");
   const memoryDir = path.join(workspaceDir, "memory");
+
+  const shouldSkipWorkspaceMemoryPath = (absPath: string): boolean =>
+    shouldSkipRootMemoryAuxiliaryPath({ workspaceDir, absPath });
 
   const addMarkdownFile = async (absPath: string) => {
     try {
@@ -135,25 +156,30 @@ export async function listMemoryFiles(
     } catch {}
   };
 
-  await addMarkdownFile(memoryFile);
-  await addMarkdownFile(altMemoryFile);
+  const memoryFile = await resolveCanonicalRootMemoryFile(workspaceDir);
+  if (memoryFile) {
+    await addMarkdownFile(memoryFile);
+  }
   try {
     const dirStat = await fs.lstat(memoryDir);
     if (!dirStat.isSymbolicLink() && dirStat.isDirectory()) {
-      await walkDir(memoryDir, result);
+      await walkDir(memoryDir, result, multimodal, shouldSkipWorkspaceMemoryPath);
     }
   } catch {}
 
   const normalizedExtraPaths = normalizeExtraMemoryPaths(workspaceDir, extraPaths);
   if (normalizedExtraPaths.length > 0) {
     for (const inputPath of normalizedExtraPaths) {
+      if (shouldSkipWorkspaceMemoryPath(inputPath)) {
+        continue;
+      }
       try {
         const stat = await fs.lstat(inputPath);
         if (stat.isSymbolicLink()) {
           continue;
         }
         if (stat.isDirectory()) {
-          await walkDir(inputPath, result, multimodal);
+          await walkDir(inputPath, result, multimodal, shouldSkipWorkspaceMemoryPath);
           continue;
         }
         if (stat.isFile() && isAllowedMemoryFilePath(inputPath, multimodal)) {
@@ -179,10 +205,6 @@ export async function listMemoryFiles(
     deduped.push(entry);
   }
   return deduped;
-}
-
-export function hashText(value: string): string {
-  return crypto.createHash("sha256").update(value).digest("hex");
 }
 
 export async function buildFileEntry(
@@ -339,8 +361,8 @@ export function chunkMarkdown(
   if (lines.length === 0) {
     return [];
   }
-  const maxChars = Math.max(32, chunking.tokens * 4);
-  const overlapChars = Math.max(0, chunking.overlap * 4);
+  const maxChars = Math.max(32, chunking.tokens * CHARS_PER_TOKEN_ESTIMATE);
+  const overlapChars = Math.max(0, chunking.overlap * CHARS_PER_TOKEN_ESTIMATE);
   const chunks: MemoryChunk[] = [];
 
   let current: Array<{ line: string; lineNo: number }> = [];
@@ -380,14 +402,14 @@ export function chunkMarkdown(
       if (!entry) {
         continue;
       }
-      acc += entry.line.length + 1;
+      acc += estimateStringChars(entry.line) + 1;
       kept.unshift(entry);
       if (acc >= overlapChars) {
         break;
       }
     }
     current = kept;
-    currentChars = kept.reduce((sum, entry) => sum + entry.line.length + 1, 0);
+    currentChars = acc;
   };
 
   for (let i = 0; i < lines.length; i += 1) {
@@ -397,12 +419,33 @@ export function chunkMarkdown(
     if (line.length === 0) {
       segments.push("");
     } else {
+      // First pass: slice at maxChars (preserves original behaviour for Latin).
+      // Second pass: if a segment's *weighted* size still exceeds the budget
+      // (happens for CJK-heavy text where 1 char ≈ 1 token), re-split it at
+      // chunking.tokens so the chunk stays within the token budget.
       for (let start = 0; start < line.length; start += maxChars) {
-        segments.push(line.slice(start, start + maxChars));
+        const coarse = line.slice(start, start + maxChars);
+        if (estimateStringChars(coarse) > maxChars) {
+          const fineStep = Math.max(1, chunking.tokens);
+          for (let j = 0; j < coarse.length; ) {
+            let end = Math.min(j + fineStep, coarse.length);
+            // Avoid splitting inside a UTF-16 surrogate pair (CJK Extension B+).
+            if (end < coarse.length) {
+              const code = coarse.charCodeAt(end - 1);
+              if (code >= 0xd800 && code <= 0xdbff) {
+                end += 1; // include the low surrogate
+              }
+            }
+            segments.push(coarse.slice(j, end));
+            j = end; // advance cursor to the adjusted boundary
+          }
+        } else {
+          segments.push(coarse);
+        }
       }
     }
     for (const segment of segments) {
-      const lineSize = segment.length + 1;
+      const lineSize = estimateStringChars(segment) + 1;
       if (currentChars + lineSize > maxChars && current.length > 0) {
         flush();
         carryOverlap();

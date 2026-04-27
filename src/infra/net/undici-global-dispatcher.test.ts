@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   Agent,
@@ -73,16 +73,20 @@ let DEFAULT_UNDICI_STREAM_TIMEOUT_MS: typeof import("./undici-global-dispatcher.
 let ensureGlobalUndiciEnvProxyDispatcher: typeof import("./undici-global-dispatcher.js").ensureGlobalUndiciEnvProxyDispatcher;
 let ensureGlobalUndiciStreamTimeouts: typeof import("./undici-global-dispatcher.js").ensureGlobalUndiciStreamTimeouts;
 let resetGlobalUndiciStreamTimeoutsForTests: typeof import("./undici-global-dispatcher.js").resetGlobalUndiciStreamTimeoutsForTests;
+let undiciGlobalDispatcherModule: typeof import("./undici-global-dispatcher.js");
 
 describe("ensureGlobalUndiciStreamTimeouts", () => {
-  beforeEach(async () => {
-    vi.resetModules();
+  beforeAll(async () => {
+    undiciGlobalDispatcherModule = await import("./undici-global-dispatcher.js");
     ({
       DEFAULT_UNDICI_STREAM_TIMEOUT_MS,
       ensureGlobalUndiciEnvProxyDispatcher,
       ensureGlobalUndiciStreamTimeouts,
       resetGlobalUndiciStreamTimeoutsForTests,
-    } = await import("./undici-global-dispatcher.js"));
+    } = undiciGlobalDispatcherModule);
+  });
+
+  beforeEach(() => {
     vi.clearAllMocks();
     resetGlobalUndiciStreamTimeoutsForTests();
     setCurrentDispatcher(new Agent());
@@ -123,12 +127,13 @@ describe("ensureGlobalUndiciStreamTimeouts", () => {
     });
   });
 
-  it("does not override unsupported custom proxy dispatcher types", () => {
+  it("records timeout bridge but does not override unsupported custom proxy dispatcher types", () => {
     setCurrentDispatcher(new ProxyAgent("http://proxy.test:8080"));
 
-    ensureGlobalUndiciStreamTimeouts();
+    ensureGlobalUndiciStreamTimeouts({ timeoutMs: 1_900_000 });
 
     expect(setGlobalDispatcher).not.toHaveBeenCalled();
+    expect(undiciGlobalDispatcherModule._globalUndiciStreamTimeoutMs).toBe(1_900_000);
   });
 
   it("is idempotent for unchanged dispatcher kind and network policy", () => {
@@ -138,6 +143,26 @@ describe("ensureGlobalUndiciStreamTimeouts", () => {
     ensureGlobalUndiciStreamTimeouts();
 
     expect(setGlobalDispatcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not lower global stream timeouts below the default floor", () => {
+    ensureGlobalUndiciStreamTimeouts({ timeoutMs: 15_000 });
+
+    expect(setGlobalDispatcher).toHaveBeenCalledTimes(1);
+    const next = getCurrentDispatcher() as { options?: Record<string, unknown> };
+    expect(next.options?.bodyTimeout).toBe(DEFAULT_UNDICI_STREAM_TIMEOUT_MS);
+    expect(next.options?.headersTimeout).toBe(DEFAULT_UNDICI_STREAM_TIMEOUT_MS);
+  });
+
+  it("honors explicit global stream timeouts above the default floor", () => {
+    const timeoutMs = DEFAULT_UNDICI_STREAM_TIMEOUT_MS + 1_000;
+
+    ensureGlobalUndiciStreamTimeouts({ timeoutMs });
+
+    expect(setGlobalDispatcher).toHaveBeenCalledTimes(1);
+    const next = getCurrentDispatcher() as { options?: Record<string, unknown> };
+    expect(next.options?.bodyTimeout).toBe(timeoutMs);
+    expect(next.options?.headersTimeout).toBe(timeoutMs);
   });
 
   it("re-applies when autoSelectFamily decision changes", () => {
@@ -238,5 +263,4 @@ afterAll(() => {
   for (const id of mockedModuleIds) {
     vi.doUnmock(id);
   }
-  vi.resetModules();
 });

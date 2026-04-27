@@ -1,13 +1,32 @@
-import type { OpenClawConfig } from "../config/config.js";
-import { loadOpenClawPlugins } from "./loader.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { normalizePluginsConfig } from "./config-state.js";
+import { resolveRuntimePluginRegistry } from "./loader.js";
 import { getMemoryRuntime } from "./memory-state.js";
+import {
+  buildPluginRuntimeLoadOptions,
+  resolvePluginRuntimeLoadContext,
+} from "./runtime/load-context.js";
+
+function resolveMemoryRuntimePluginIds(config: OpenClawConfig): string[] {
+  const memorySlot = normalizePluginsConfig(config.plugins).slots.memory;
+  return typeof memorySlot === "string" && memorySlot.trim().length > 0 ? [memorySlot] : [];
+}
 
 function ensureMemoryRuntime(cfg?: OpenClawConfig) {
   const current = getMemoryRuntime();
   if (current || !cfg) {
     return current;
   }
-  loadOpenClawPlugins({ config: cfg });
+  const context = resolvePluginRuntimeLoadContext({ config: cfg });
+  const onlyPluginIds = resolveMemoryRuntimePluginIds(context.config);
+  if (onlyPluginIds.length === 0) {
+    return getMemoryRuntime();
+  }
+  resolveRuntimePluginRegistry(
+    buildPluginRuntimeLoadOptions(context, {
+      onlyPluginIds,
+    }),
+  );
   return getMemoryRuntime();
 }
 
@@ -28,6 +47,7 @@ export function resolveActiveMemoryBackendConfig(params: { cfg: OpenClawConfig; 
 }
 
 export async function closeActiveMemorySearchManagers(cfg?: OpenClawConfig): Promise<void> {
-  const runtime = ensureMemoryRuntime(cfg);
+  void cfg;
+  const runtime = getMemoryRuntime();
   await runtime?.closeAllMemorySearchManagers?.();
 }
