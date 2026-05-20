@@ -25,8 +25,8 @@ export type OllamaEmbeddingProvider = {
   id: string;
   model: string;
   maxInputTokens?: number;
-  embedQuery: (text: string) => Promise<number[]>;
-  embedBatch: (texts: string[]) => Promise<number[][]>;
+  embedQuery: (text: string, options?: { signal?: AbortSignal }) => Promise<number[]>;
+  embedBatch: (texts: string[], options?: { signal?: AbortSignal }) => Promise<number[][]>;
 };
 
 type OllamaEmbeddingOptions = {
@@ -57,8 +57,29 @@ type OllamaEmbeddingClientConfig = Omit<OllamaEmbeddingClient, "embedBatch">;
 
 export const DEFAULT_OLLAMA_EMBEDDING_MODEL = "nomic-embed-text";
 
-function sanitizeAndNormalizeEmbedding(vec: number[]): number[] {
-  const sanitized = vec.map((value) => (Number.isFinite(value) ? value : 0));
+const QUERY_INSTRUCTION_TEMPLATES = [
+  {
+    prefix: "qwen3-embedding",
+    template:
+      "Instruct: Given a user query, retrieve relevant memory notes and documents\nQuery:{query}",
+  },
+  {
+    prefix: "nomic-embed-text",
+    template: "search_query: {query}",
+  },
+  {
+    prefix: "mxbai-embed-large",
+    template: "Represent this sentence for searching relevant passages: {query}",
+  },
+] as const;
+
+function sanitizeAndNormalizeEmbedding(vec: unknown[]): number[] {
+  const sanitized = vec.map((value) => {
+    if (typeof value !== "number") {
+      throw new Error("Ollama embed response contains a non-number embedding value");
+    }
+    return Number.isFinite(value) ? value : 0;
+  });
   const magnitude = Math.sqrt(sanitized.reduce((sum, value) => sum + value * value, 0));
   if (magnitude < 1e-10) {
     return sanitized;
@@ -69,12 +90,14 @@ function sanitizeAndNormalizeEmbedding(vec: number[]): number[] {
 async function withRemoteHttpResponse<T>(params: {
   url: string;
   init?: RequestInit;
+  signal?: AbortSignal;
   ssrfPolicy?: SsrFPolicy;
   onResponse: (response: Response) => Promise<T>;
 }): Promise<T> {
   const { response, release } = await fetchWithSsrFGuard({
     url: params.url,
     init: params.init,
+    signal: params.signal,
     policy: params.ssrfPolicy,
     auditContext: "memory-remote",
   });
@@ -85,12 +108,35 @@ async function withRemoteHttpResponse<T>(params: {
   }
 }
 
+async function readOllamaEmbeddingJsonResponse(
+  response: Pick<Response, "json">,
+): Promise<{ embeddings?: unknown }> {
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch (cause) {
+    throw new Error("Ollama embed response returned malformed JSON", { cause });
+  }
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    throw new Error("Ollama embed response returned a non-object JSON payload");
+  }
+  return payload as { embeddings?: unknown };
+}
+
 function normalizeEmbeddingModel(model: string, providerId?: string): string {
   const trimmed = model.trim();
   if (!trimmed) {
     return DEFAULT_OLLAMA_EMBEDDING_MODEL;
   }
   return normalizeOllamaWireModelId(trimmed, providerId);
+}
+
+function applyQueryInstructionTemplate(model: string, queryText: string): string {
+  const normalizedModel = model.trim().toLowerCase();
+  const match = QUERY_INSTRUCTION_TEMPLATES.find(({ prefix }) =>
+    normalizedModel.startsWith(prefix),
+  );
+  return match ? match.template.replace("{query}", () => queryText) : queryText;
 }
 
 function resolveConfiguredProvider(options: OllamaEmbeddingOptions) {
@@ -278,10 +324,11 @@ export async function createOllamaEmbeddingProvider(
   const client = resolveOllamaEmbeddingClient(options);
   const embedUrl = `${client.baseUrl.replace(/\/$/, "")}/api/embed`;
 
-  const embedMany = async (input: string | string[]): Promise<number[][]> => {
+  const embedMany = async (input: string | string[], signal?: AbortSignal): Promise<number[][]> => {
     const json = await withRemoteHttpResponse({
       url: embedUrl,
       ssrfPolicy: client.ssrfPolicy,
+      signal,
       init: {
         method: "POST",
         headers: client.headers,
@@ -291,7 +338,7 @@ export async function createOllamaEmbeddingProvider(
         if (!response.ok) {
           throw new Error(`Ollama embed HTTP ${response.status}: ${await response.text()}`);
         }
-        return (await response.json()) as { embeddings?: unknown };
+        return await readOllamaEmbeddingJsonResponse(response);
       },
     });
     if (!Array.isArray(json.embeddings)) {
@@ -311,19 +358,23 @@ export async function createOllamaEmbeddingProvider(
     });
   };
 
-  const embedOne = async (text: string): Promise<number[]> => {
-    const [embedding] = await embedMany(text);
+  const embedOne = async (text: string, signal?: AbortSignal): Promise<number[]> => {
+    const [embedding] = await embedMany(text, signal);
     if (!embedding) {
       throw new Error("Ollama embed response returned no embedding");
     }
     return embedding;
   };
 
+  const embedQuery = async (text: string, options?: { signal?: AbortSignal }): Promise<number[]> =>
+    await embedOne(applyQueryInstructionTemplate(client.model, text), options?.signal);
+
   const provider: OllamaEmbeddingProvider = {
     id: "ollama",
     model: client.model,
-    embedQuery: embedOne,
-    embedBatch: async (texts) => (texts.length === 0 ? [] : await embedMany(texts)),
+    embedQuery,
+    embedBatch: async (texts, options) =>
+      texts.length === 0 ? [] : await embedMany(texts, options?.signal),
   };
 
   return {
