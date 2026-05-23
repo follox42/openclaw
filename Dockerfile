@@ -278,6 +278,24 @@ RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,shar
         docker-ce-cli docker-compose-plugin; \
     fi
 
+# Optionally bundle external npm plugins into the image so they survive
+# a wiped runtime volume. The volume mount at /home/node/.openclaw shadows
+# the user-mounted plugin tree, so we stage the npm install under /opt/
+# and let the openclaw-config repo's init-plugins.sh seed the volume on
+# first boot (or after a restore-from-zero).
+#
+# Build with: docker build --build-arg OPENCLAW_IMAGE_NPM_PLUGINS="..." .
+# Default ships nolann's standard plugin set; pass empty string to disable.
+ARG OPENCLAW_IMAGE_NPM_PLUGINS="@openclaw/lobster @openclaw/discord @mem0/openclaw-mem0"
+ENV OPENCLAW_BUNDLED_NPM_PLUGINS_DIR=/opt/openclaw-bundled-plugins
+RUN if [ -n "$OPENCLAW_IMAGE_NPM_PLUGINS" ]; then \
+      mkdir -p "$OPENCLAW_BUNDLED_NPM_PLUGINS_DIR/npm" && \
+      cd "$OPENCLAW_BUNDLED_NPM_PLUGINS_DIR/npm" && \
+      npm init -y >/dev/null 2>&1 && \
+      npm install --no-audit --no-fund $OPENCLAW_IMAGE_NPM_PLUGINS && \
+      chown -R node:node "$OPENCLAW_BUNDLED_NPM_PLUGINS_DIR"; \
+    fi
+
 # Expose the CLI binary without requiring npm global writes as non-root.
 RUN ln -sf /app/openclaw.mjs /usr/local/bin/openclaw \
  && chmod 755 /app/openclaw.mjs
