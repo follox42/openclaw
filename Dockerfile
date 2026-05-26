@@ -123,6 +123,9 @@ ARG OPENCLAW_EXTENSIONS
 ARG OPENCLAW_BUNDLED_PLUGIN_DIR
 RUN --mount=type=cache,id=openclaw-pnpm-store,target=/root/.local/share/pnpm/store,sharing=locked \
     CI=true pnpm prune --prod \
+      --config.fetch-retries=0 \
+      --config.fetch-retry-maxtimeout=5000 \
+      --config.network-timeout=15000 \
       --config.supportedArchitectures.os=linux \
       --config.supportedArchitectures.cpu="$(node -p 'process.arch')" \
       --config.supportedArchitectures.libc=glibc && \
