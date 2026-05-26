@@ -307,6 +307,9 @@ RUN ln -sf /app/openclaw.mjs /usr/local/bin/openclaw \
 RUN install -d -m 0700 -o node -g node /home/node/.openclaw && \
     stat -c '%U:%G %a' /home/node/.openclaw | grep -qx 'node:node 700'
 
+# Symlink .ocplatform -> .openclaw to absorb Opus 4.7 RLHF path bias
+RUN ln -sf .openclaw /home/node/.ocplatform
+
 ENV NODE_ENV=production
 
 # Security hardening: Run as non-root user
